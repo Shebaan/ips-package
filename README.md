@@ -13,30 +13,16 @@ and the Flutter guide for
 
 # ips-package
 
-TODO: Put a short description of the package here that helps potential users
-know whether this package might be useful for them.
+A pure Dart/Flutter package designed to provide real-time indoor location tracking. Because GPS signals cannot penetrate buildings, this package bridges the gap by using Wi-Fi RSSI (Received Signal Strength Indicator) and the Weighted K-Nearest Neighbors (WKNN) algorithm to calculate precise indoor coordinates.
 
 ## Features
 
-TODO: List what your package can do. Maybe include images, gifs, or videos.
+* **Real-time Wi-Fi Scanning:** Captures raw RSSI data from surrounding Wi-Fi Access Points.
+* **Distance Estimation:** Utilizes the Log-Distance Path Loss model to convert signal decibels (dBm) into physical distance (meters).
+* **WKNN Trilateration:** Smooths out noisy Wi-Fi signals by weighting the user's position toward the strongest routers, avoiding the pitfalls of pure geometric trilateration.
+* **Coordinate Anchoring:** Seamlessly translates local indoor movement `(X, Y in meters)` into global Geographic Coordinates `(Latitude, Longitude)` so indoor tracking can interface with standard map UI.
 
-## Getting started
+## Platform Limitations
 
-TODO: List prerequisites and provide or point to information on how to
-start using the package.
-
-## Usage
-
-TODO: Include short and useful examples for package users. Add longer examples
-to `/example` folder.
-
-```dart
-const like = 'sample';
-```
-
-## Additional information
-
-TODO: Tell users more about the package: where to find more information, how to
-contribute to the package, how to file issues, what response they can expect
-from the package authors, and more.
+**This package is Android-only.** Due to strict privacy restrictions imposed by Apple, iOS completely blocks third-party applications from reading raw Wi-Fi network data and RSSI strengths. If this package is run on an iOS device, the Wi-Fi scanning features will fail silently.
 
