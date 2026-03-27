@@ -9,3 +9,6 @@ export 'src/utils/indoor_utils.dart';
 
 // Export Services
 export 'src/services/anchor_manager.dart';
+
+// Export Screens
+export 'src/screens/map_collection_screen.dart';

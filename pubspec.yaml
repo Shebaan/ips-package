@@ -11,6 +11,7 @@ dependencies:
   flutter:
     sdk: flutter
   geolocator: ^14.0.2
+  google_maps_flutter: ^2.16.0
   latlong2: ^0.9.1
   socket_io_client: ^3.1.4
   wifi_scan: ^0.4.1+2

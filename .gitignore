@@ -10,6 +10,10 @@
 .svn/
 migrate_working_dir/
 
+# API Keys
+local.xcconfig
+local.properties
+
 # IntelliJ related
 *.iml
 *.ipr
