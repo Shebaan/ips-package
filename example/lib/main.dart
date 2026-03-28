@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
-// Import your package UI
+// Import your package UI and logic
 import 'package:ips_package/ips_package.dart';
-
+import 'package:ips_package/src/services/anchor_manager.dart';
 
 void main() {
   runApp(const IpsTestApp());
@@ -24,19 +24,41 @@ class IpsTestApp extends StatelessWidget {
   }
 }
 
-class HomeScreen extends StatelessWidget {
+// 1. Upgraded to StatefulWidget so it can remember data!
+class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  // 2. These variables live at the class level now, so ALL functions can see them.
+  final AnchorManager _anchorManager = AnchorManager();
+  bool _hasSavedGrid = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkSavedData();
+  }
+
+  // 3. Automatically check the hard drive when the app opens
+  Future<void> _checkSavedData() async {
+    final hasData = await _anchorManager.loadGridFromDisk();
+    setState(() {
+      _hasSavedGrid = hasData;
+    });
+  }
 
   void _startSetup(BuildContext context) async {
     print("Opening Map Screen...");
     
-    // Open the screen and wait
     final result = await Navigator.push(
       context,
       MaterialPageRoute(builder: (context) => MapCollectionScreen()),
     );
 
-    // Process results
     print("Map Screen Closed. Raw Result: $result");
 
     if (result == null) {
@@ -44,7 +66,6 @@ class HomeScreen extends StatelessWidget {
       return;
     }
 
-    // Safely extract the data
     try {
       final Map<String, dynamic> data = Map<String, dynamic>.from(result as Map);
       final List<LatLng> corners = List<LatLng>.from(data['corners']);
@@ -53,24 +74,37 @@ class HomeScreen extends StatelessWidget {
       print("Data extracted! Corners: ${corners.length}, Routers: ${routers.length}");
       print("Handing off to AnchorManager...");
       
-      // Run the math function to convert to local coordinates and save to disk
-      final anchorManager = AnchorManager();
-      anchorManager.processBuildingData(corners: corners, routers: routers);
+      // 4. Use the class-level _anchorManager here!
+      _anchorManager.processBuildingData(corners: corners, routers: routers);
+      
+      // 5. Tell the UI we now have data
+      setState(() {
+        _hasSavedGrid = true;
+      });
       
     } catch (e) {
       print("Error parsing the returned data: $e");
     }
   }
 
-  // Placeholder function for next commit
+  // 6. Matched the UK spelling!
   void _viewLocalisedMap(BuildContext context) {
-    print("Navigating to Localised Map...");
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Localised Map Screen coming soon!')),
+    if (!_hasSavedGrid) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please run Map Setup first!')),
+      );
+      return;
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => LocalisedMapScreen(
+          corners: _anchorManager.buildingCorners,
+          routers: _anchorManager.wifiRouters,
+        ),
+      ),
     );
-    
-    // TODO: In next commit, replace the SnackBar with a Navigator.push
-    // to new CustomPaint 2D blueprint screen.
   }
 
   @override
@@ -83,7 +117,6 @@ class HomeScreen extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Button 1: Map Setup
             ElevatedButton.icon(
               onPressed: () => _startSetup(context),
               icon: const Icon(Icons.add_location_alt),
@@ -95,9 +128,8 @@ class HomeScreen extends StatelessWidget {
               ),
             ),
             
-            const SizedBox(height: 20), // Breathing room between buttons
+            const SizedBox(height: 20),
             
-            // Button 2: View Localised Map
             ElevatedButton.icon(
               onPressed: () => _viewLocalisedMap(context),
               icon: const Icon(Icons.architecture),

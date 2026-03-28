@@ -1,32 +1,87 @@
-import '../models/reference_point.dart';
+import 'dart:convert';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../models/ips_node.dart';
+import '../utils/coordinate_converter.dart';
 
 class AnchorManager {
-  // The internal "database" list. 
-  final List<ReferencePoint> _anchors = [];
+  List<IpsNode> buildingCorners = [];
+  List<IpsNode> wifiRouters = [];
+  
+  LatLng? _originPoint;
 
-  /// Returns a read-only view of the anchors.
-  List<ReferencePoint> get anchors => _anchors;
+  void processBuildingData({required List<LatLng> corners, required List<LatLng> routers}) {
+    if (corners.isEmpty) return;
+    _originPoint = corners.first;
+    buildingCorners.clear();
+    wifiRouters.clear();
 
-  /// Adds a newly created Reference Point to the database.
-  void addAnchor(ReferencePoint point) {
-    _anchors.add(point);
-  }
-
-  /// Clears all anchors (useful for resetting the map)
-  void clearAnchors() {
-    _anchors.clear();
-  }
-
-  /// Finds the primary "Origin" anchor where (X: 0, Y: 0)
-  ReferencePoint? getOriginAnchor() {
-    try {
-      // Searches the list for the first anchor that matches this condition
-      return _anchors.firstWhere(
-        (anchor) => anchor.localX == 0.0 && anchor.localY == 0.0,
-      );
-    } catch (e) {
-      // If no origin exists yet, return null
-      return null; 
+    for (int i = 0; i < corners.length; i++) {
+      final localCoords = CoordinateConverter.toLocalCartesian(target: corners[i], origin: _originPoint!);
+      buildingCorners.add(IpsNode(
+        id: 'corner_$i', type: i == 0 ? NodeType.origin : NodeType.corner,
+        globalCoordinates: corners[i], localX: localCoords['x']!, localY: localCoords['y']!,
+      ));
     }
+
+    for (int i = 0; i < routers.length; i++) {
+      final localCoords = CoordinateConverter.toLocalCartesian(target: routers[i], origin: _originPoint!);
+      wifiRouters.add(IpsNode(
+        id: 'router_$i', type: NodeType.router,
+        globalCoordinates: routers[i], localX: localCoords['x']!, localY: localCoords['y']!,
+      ));
+    }
+
+    _printDebugGrid();
+    saveGridToDisk(); 
+  }
+
+  Future<void> saveGridToDisk() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    // Convert lists to JSON strings
+    final String cornersJson = jsonEncode(buildingCorners.map((node) => node.toJson()).toList());
+    final String routersJson = jsonEncode(wifiRouters.map((node) => node.toJson()).toList());
+
+    // Write to device storage
+    await prefs.setString('ips_corners', cornersJson);
+    await prefs.setString('ips_routers', routersJson);
+    print('IPS Grid successfully saved to local device storage!');
+  }
+
+  Future<bool> loadGridFromDisk() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    final String? cornersString = prefs.getString('ips_corners');
+    final String? routersString = prefs.getString('ips_routers');
+
+    if (cornersString != null && routersString != null) {
+      // Decode the JSON strings back into Lists of dynamic maps
+      final List<dynamic> decodedCorners = jsonDecode(cornersString);
+      final List<dynamic> decodedRouters = jsonDecode(routersString);
+
+      // Rebuild the IpsNode objects
+      buildingCorners = decodedCorners.map((item) => IpsNode.fromJson(item)).toList();
+      wifiRouters = decodedRouters.map((item) => IpsNode.fromJson(item)).toList();
+      
+      if (buildingCorners.isNotEmpty) {
+        _originPoint = buildingCorners.first.globalCoordinates;
+      }
+      
+      print('IPS Grid successfully loaded from local storage!');
+      _printDebugGrid();
+      return true; // Data exists!
+    }
+    
+    print('🤷‍♂️ No saved grid found. Needs setup.');
+    return false; // No data, user needs to do the map setup.
+  }
+
+  void _printDebugGrid() {
+    print('\n--- IPS GRID ---');
+    for (var corner in buildingCorners) { print(corner); }
+    print('---');
+    for (var router in wifiRouters) { print(router); }
+    print('-------------------\n');
   }
 }
