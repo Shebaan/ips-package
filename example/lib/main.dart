@@ -68,22 +68,25 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       final Map<String, dynamic> data = Map<String, dynamic>.from(result as Map);
-      final List<LatLng> corners = List<LatLng>.from(data['corners']);
-      final List<LatLng> routers = List<LatLng>.from(data['routers']);
-
-      print("Data extracted! Corners: ${corners.length}, Routers: ${routers.length}");
-      print("Handing off to AnchorManager...");
       
-      // 4. Use the class-level _anchorManager here!
+      // Extract corners as standard LatLng
+      final List<LatLng> corners = List<LatLng>.from(data['corners']);
+      
+      // Extract routers as the new Map structure
+      final List<Map<String, dynamic>> routers = List<Map<String, dynamic>>.from(data['routers']);
+
+      debugPrint("Data extracted! Corners: ${corners.length}, Routers: ${routers.length}");
+      debugPrint("Handing off to AnchorManager...");
+      
+      // Pass the updated lists directly to AnchorManager
       _anchorManager.processBuildingData(corners: corners, routers: routers);
       
-      // 5. Tell the UI we now have data
       setState(() {
         _hasSavedGrid = true;
       });
       
     } catch (e) {
-      print("Error parsing the returned data: $e");
+      debugPrint("Error parsing the returned data: $e");
     }
   }
 

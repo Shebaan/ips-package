@@ -2,7 +2,7 @@
 /// 
 /// This screen walks the user through a two-step process:
 /// 1. Defining the building perimeter (creating an N-sided polygon).
-/// 2. Placing internal Wi-Fi routers (RF anchors).
+/// 2. Placing internal Wi-Fi routers (RF anchors) and capturing their MAC addresses.
 /// 
 /// ### Prerequisites for the Host App:
 /// * **Android:** Google Maps API key in `AndroidManifest.xml` & Location permissions.
@@ -16,34 +16,29 @@
 // import 'package:ips_package/src/services/anchor_manager.dart';
 //
 // void _startSetup(BuildContext context) async {
-//   // Open the screen and wait for the result
 //   final result = await Navigator.push(
 //     context,
 //     MaterialPageRoute(builder: (context) => MapCollectionScreen()),
 //   );
-
-//   // Check if the user actually finished the setup (result will be null if they canceled)
-//   if (result != null && result is Map<String, List<LatLng>>) {
-    
-//     // Extract the data
-//     final List<LatLng> corners = result['corners']!;
-//     final List<LatLng> routers = result['routers']!;
-
-//     // Pass data to anchorManager service for processing and storage
+//
+//   if (result != null) {
+//     final Map<String, dynamic> data = Map<String, dynamic>.from(result as Map);
+//     final List<LatLng> corners = List<LatLng>.from(data['corners']);
+//     final List<Map<String, dynamic>> routers = List<Map<String, dynamic>>.from(data['routers']);
+//
 //     final anchorManager = AnchorManager();
 //     anchorManager.processBuildingData(corners: corners, routers: routers);
-    
-//     print('Successfully saved to AnchorManager!');
 //   }
 // }
 //
-/// /// ### How to Exit:
+/// ### How to Exit:
 /// * **Cancel/Abort:** The user can press the standard back button in the AppBar. This returns `null`.
-/// * **Finish/Save:** The user taps "Finish" on the routers phase. This returns a `Map<String, List<LatLng>>`.
+/// * **Finish/Save:** The user taps "Finish" on the routers phase. Returns a `Map<String, dynamic>`.
 
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:wifi_scan/wifi_scan.dart';
 
 enum CollectionPhase { corners, routers }
 
@@ -54,12 +49,20 @@ class MapCollectionScreen extends StatefulWidget {
 
 class _MapCollectionScreenState extends State<MapCollectionScreen> {
   GoogleMapController? _mapController;
+  final TextEditingController _macController = TextEditingController();
   
   CollectionPhase _currentPhase = CollectionPhase.corners;
   
   List<LatLng> _buildingCorners = [];
-  List<LatLng> _routerLocations = [];
+  // Updated to hold both coordinates and MAC address
+  List<Map<String, dynamic>> _routerLocations = [];
   bool _isPerimeterClosed = false;
+
+  @override
+  void dispose() {
+    _macController.dispose();
+    super.dispose();
+  }
 
   Future<void> _addCurrentLocation() async {
     LocationPermission permission = await Geolocator.checkPermission();
@@ -91,9 +94,143 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
     ));
   }
 
+  /// Displays the dialog to capture Wi-Fi fingerprint data
+  Future<void> _showWifiDialog(LatLng tappedPoint) async {
+    _macController.clear();
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Add Wi-Fi Router'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Enter the MAC Address (BSSID) for this router, or scan nearby networks.'),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _macController,
+                decoration: const InputDecoration(
+                  labelText: 'MAC Address (e.g., 00:1A:2B:3C:4D:5E)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton.icon(
+                onPressed: _scanForWifiNetworks, // Updated to call the scanner
+                icon: const Icon(Icons.wifi_find),
+                label: const Text('Scan Nearby Networks'),
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 40),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {
+                  _routerLocations.add({
+                    'latLng': tappedPoint,
+                    'macAddress': _macController.text.trim().isEmpty ? 'UNKNOWN' : _macController.text.trim(),
+                  });
+                });
+                Navigator.pop(context);
+              },
+              child: const Text('Save Router'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _scanForWifiNetworks() async {
+    // 1. Check if the device is capable of scanning
+    final canStartScan = await WiFiScan.instance.canStartScan();
+    
+    if (canStartScan != CanStartScan.yes) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Wi-Fi scanning is not supported or permitted on this device. Code: $canStartScan')),
+        );
+      }
+      return;
+    }
+
+    // 2. Trigger the hardware scan
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Scanning for networks...')),
+      );
+    }
+    
+    await WiFiScan.instance.startScan();
+    
+    // 3. Retrieve the results
+    final List<WiFiAccessPoint> accessPoints = await WiFiScan.instance.getScannedResults();
+
+    if (accessPoints.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No networks found. Ensure Wi-Fi is enabled.')),
+        );
+      }
+      return;
+    }
+
+    // Sort by signal strength (strongest first)
+    accessPoints.sort((a, b) => b.level.compareTo(a.level));
+
+    // 4. Display the results in a Bottom Sheet
+    if (!mounted) return;
+    
+    showModalBottomSheet(
+      context: context,
+      builder: (BuildContext context) {
+        return Column(
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Text(
+                'Nearby Networks',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                itemCount: accessPoints.length,
+                itemBuilder: (context, index) {
+                  final ap = accessPoints[index];
+                  return ListTile(
+                    leading: const Icon(Icons.wifi),
+                    title: Text(ap.ssid.isNotEmpty ? ap.ssid : 'Hidden Network'),
+                    subtitle: Text('MAC: ${ap.bssid} | Signal: ${ap.level} dBm'),
+                    onTap: () {
+                      // Auto-fill the text field and close the bottom sheet
+                      setState(() {
+                        _macController.text = ap.bssid;
+                      });
+                      Navigator.pop(context);
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   void _addPoint(LatLng point) {
-    setState(() {
-      if (_currentPhase == CollectionPhase.corners) {
+    if (_currentPhase == CollectionPhase.corners) {
+      setState(() {
         if (!_isPerimeterClosed) {
           _buildingCorners.add(point);
         } else {
@@ -101,10 +238,11 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
             const SnackBar(content: Text('Perimeter is locked! Undo to edit, or tap Next.')),
           );
         }
-      } else {
-        _routerLocations.add(point);
-      }
-    });
+      });
+    } else {
+      // Trigger dialog instead of immediate placement
+      _showWifiDialog(point);
+    }
   }
 
   // Undo Logic
@@ -112,10 +250,8 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
     setState(() {
       if (_currentPhase == CollectionPhase.corners) {
         if (_isPerimeterClosed) {
-          // If closed, the first Undo just opens the shape back up
           _isPerimeterClosed = false;
         } else if (_buildingCorners.isNotEmpty) {
-          // If open, delete the last point
           _buildingCorners.removeLast();
         }
       } else if (_currentPhase == CollectionPhase.routers && _routerLocations.isNotEmpty) {
@@ -161,13 +297,17 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
       );
     }
 
+    // Updated to extract data from the Map structure
     for (int i = 0; i < _routerLocations.length; i++) {
+      final pos = _routerLocations[i]['latLng'] as LatLng;
+      final mac = _routerLocations[i]['macAddress'] as String;
+
       markers.add(
         Marker(
           markerId: MarkerId('router_$i'),
-          position: _routerLocations[i],
+          position: pos,
           icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-          infoWindow: InfoWindow(title: 'Wi-Fi Router ${i + 1}'),
+          infoWindow: InfoWindow(title: 'Wi-Fi Router ${i + 1}', snippet: 'MAC: $mac'),
         ),
       );
     }
@@ -202,7 +342,6 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
       return;
     }
 
-    // Bundle the collected data into a Map
     final collectedData = {
       'corners': _buildingCorners,
       'routers': _routerLocations,
@@ -212,7 +351,6 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
       const SnackBar(content: Text('Setup Complete!')),
     );
 
-    // Exit the screen and hand the data back to the caller
     if (Navigator.canPop(context)) {
       Navigator.pop(context, collectedData);
     }
@@ -225,19 +363,17 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
         title: Text(_currentPhase == CollectionPhase.corners 
             ? '1. Map Building Corners' 
             : '2. Place Wi-Fi Routers', style: const TextStyle(fontSize: 18),),
-        backgroundColor: Colors.white, // Made AppBar white so black text pops
-        foregroundColor: Colors.black, // Makes the back button black
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black,
         actions: [
           if (_currentPhase == CollectionPhase.corners)
             TextButton(
               onPressed: () => setState(() => _currentPhase = CollectionPhase.routers),
-              // FIX: Black "Next" text
               child: const Text('Next', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16)),
             )
           else
             TextButton(
               onPressed: _saveAndExit,
-              // FIX: Black "Finish" text
               child: const Text('Finish', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16)),
             )
         ],

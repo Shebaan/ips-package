@@ -7,7 +7,8 @@ class IpsNode {
   final NodeType type;
   final LatLng globalCoordinates; 
   final double localX;            
-  final double localY;            
+  final double localY;  
+  final String? macAddress; // The Wi-Fi Fingerprint (BSSID)          
 
   IpsNode({
     required this.id,
@@ -15,21 +16,21 @@ class IpsNode {
     required this.globalCoordinates,
     required this.localX,
     required this.localY,
+    this.macAddress, 
   });
 
-  // Convert Object TO JSON (For Saving)
   Map<String, dynamic> toJson() {
     return {
       'id': id,
-      'type': type.name, // Saves 'origin', 'corner', or 'router'
+      'type': type.name, 
       'lat': globalCoordinates.latitude,
       'lng': globalCoordinates.longitude,
       'localX': localX,
       'localY': localY,
+      'macAddress': macAddress, 
     };
   }
 
-  // Rebuild Object FROM JSON (For Loading)
   factory IpsNode.fromJson(Map<String, dynamic> json) {
     return IpsNode(
       id: json['id'],
@@ -37,11 +38,12 @@ class IpsNode {
       globalCoordinates: LatLng(json['lat'], json['lng']),
       localX: json['localX'],
       localY: json['localY'],
+      macAddress: json['macAddress'], 
     );
   }
 
   @override
   String toString() {
-    return '${type.name.toUpperCase()} "$id" -> (x: ${localX.toStringAsFixed(2)}m, y: ${localY.toStringAsFixed(2)}m)';
+    return '${type.name.toUpperCase()} "$id" ${macAddress != null ? '[$macAddress]' : ''} -> (x: ${localX.toStringAsFixed(2)}m, y: ${localY.toStringAsFixed(2)}m)';
   }
 }

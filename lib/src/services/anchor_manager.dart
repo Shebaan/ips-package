@@ -10,25 +10,48 @@ class AnchorManager {
   
   LatLng? _originPoint;
 
-  void processBuildingData({required List<LatLng> corners, required List<LatLng> routers}) {
+  void processBuildingData({
+    required List<LatLng> corners, 
+    required List<Map<String, dynamic>> routers, // Updated signature
+  }) {
     if (corners.isEmpty) return;
     _originPoint = corners.first;
     buildingCorners.clear();
     wifiRouters.clear();
 
+    // Process Corners (Unchanged)
     for (int i = 0; i < corners.length; i++) {
-      final localCoords = CoordinateConverter.toLocalCartesian(target: corners[i], origin: _originPoint!);
+      final localCoords = CoordinateConverter.toLocalCartesian(
+        target: corners[i], 
+        origin: _originPoint!
+      );
+      
       buildingCorners.add(IpsNode(
-        id: 'corner_$i', type: i == 0 ? NodeType.origin : NodeType.corner,
-        globalCoordinates: corners[i], localX: localCoords['x']!, localY: localCoords['y']!,
+        id: 'corner_$i', 
+        type: i == 0 ? NodeType.origin : NodeType.corner,
+        globalCoordinates: corners[i], 
+        localX: localCoords['x']!, 
+        localY: localCoords['y']!,
       ));
     }
 
+    // Process Routers (Now unpacks the Map to extract LatLng and MAC)
     for (int i = 0; i < routers.length; i++) {
-      final localCoords = CoordinateConverter.toLocalCartesian(target: routers[i], origin: _originPoint!);
+      final LatLng routerCoords = routers[i]['latLng'] as LatLng;
+      final String macAddress = routers[i]['macAddress'] as String;
+
+      final localCoords = CoordinateConverter.toLocalCartesian(
+        target: routerCoords, 
+        origin: _originPoint!
+      );
+      
       wifiRouters.add(IpsNode(
-        id: 'router_$i', type: NodeType.router,
-        globalCoordinates: routers[i], localX: localCoords['x']!, localY: localCoords['y']!,
+        id: 'router_$i', 
+        type: NodeType.router,
+        globalCoordinates: routerCoords, 
+        localX: localCoords['x']!, 
+        localY: localCoords['y']!,
+        macAddress: macAddress, // Inject the MAC address into the data model
       ));
     }
 
