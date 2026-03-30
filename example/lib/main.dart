@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 // Import your package UI and logic
 import 'package:ips_package/ips_package.dart';
-import 'package:ips_package/src/services/anchor_manager.dart';
 
 void main() {
   runApp(const IpsTestApp());
@@ -54,6 +52,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _startSetup(BuildContext context) async {
     print("Opening Map Screen...");
     
+    // Removed 'const' here
     final result = await Navigator.push(
       context,
       MaterialPageRoute(builder: (context) => MapCollectionScreen()),
@@ -66,27 +65,29 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    try {
-      final Map<String, dynamic> data = Map<String, dynamic>.from(result as Map);
+    if (result is Map<String, dynamic>) {
+      print("Handing off raw data to AnchorManager for validation and processing...");
       
-      // Extract corners as standard LatLng
-      final List<LatLng> corners = List<LatLng>.from(data['corners']);
-      
-      // Extract routers as the new Map structure
-      final List<Map<String, dynamic>> routers = List<Map<String, dynamic>>.from(data['routers']);
+      // Hand the raw dictionary straight to the service layer
+      final bool isSuccess = _anchorManager.processBuildingData(result);
 
-      debugPrint("Data extracted! Corners: ${corners.length}, Routers: ${routers.length}");
-      debugPrint("Handing off to AnchorManager...");
-      
-      // Pass the updated lists directly to AnchorManager
-      _anchorManager.processBuildingData(corners: corners, routers: routers);
-      
-      setState(() {
-        _hasSavedGrid = true;
-      });
-      
-    } catch (e) {
-      debugPrint("Error parsing the returned data: $e");
+      if (isSuccess) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Successfully mapped building and saved Wi-Fi anchors!')),
+        );
+        setState(() {
+          _hasSavedGrid = true;
+        });
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Invalid data received. Please try the setup again.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } else {
+      print("Error: The returned data was not in the expected dictionary format.");
     }
   }
 

@@ -10,55 +10,77 @@ class AnchorManager {
   
   LatLng? _originPoint;
 
-  void processBuildingData({
-    required List<LatLng> corners, 
-    required List<Map<String, dynamic>> routers, // Updated signature
-  }) {
-    if (corners.isEmpty) return;
-    _originPoint = corners.first;
-    buildingCorners.clear();
-    wifiRouters.clear();
+  /// Ingests the raw data dictionary from the MapCollectionScreen.
+  /// Validates the data, processes spatial coordinates, and saves to disk.
+  /// Returns [true] if successful, [false] if the data was invalid.
+  bool processBuildingData(Map<String, dynamic> rawData) {
+    try {
+      // 1. Validation phase
+      if (!rawData.containsKey('corners') || !rawData.containsKey('routers')) {
+        print("AnchorManager Validation Failed: Missing data keys.");
+        return false;
+      }
 
-    // Process Corners (Unchanged)
-    for (int i = 0; i < corners.length; i++) {
-      final localCoords = CoordinateConverter.toLocalCartesian(
-        target: corners[i], 
-        origin: _originPoint!
-      );
+      // Safely unpack the data
+      final List<LatLng> corners = List<LatLng>.from(rawData['corners']);
+      final List<Map<String, dynamic>> routers = List<Map<String, dynamic>>.from(rawData['routers']);
+
+      if (corners.isEmpty) {
+        print("AnchorManager Validation Failed: No building corners provided.");
+        return false;
+      }
+
+      // 2. Processing phase
+      _originPoint = corners.first;
+      buildingCorners.clear();
+      wifiRouters.clear();
+
+      for (int i = 0; i < corners.length; i++) {
+        final localCoords = CoordinateConverter.toLocalCartesian(
+          target: corners[i], 
+          origin: _originPoint!
+        );
+        
+        buildingCorners.add(IpsNode(
+          id: 'corner_$i', 
+          type: i == 0 ? NodeType.origin : NodeType.corner,
+          globalCoordinates: corners[i], 
+          localX: localCoords['x']!, 
+          localY: localCoords['y']!,
+        ));
+      }
+
+      for (int i = 0; i < routers.length; i++) {
+        final LatLng routerCoords = routers[i]['latLng'] as LatLng;
+        final String macAddress = routers[i]['macAddress'] as String;
+
+        final localCoords = CoordinateConverter.toLocalCartesian(
+          target: routerCoords, 
+          origin: _originPoint!
+        );
+        
+        wifiRouters.add(IpsNode(
+          id: 'router_$i', 
+          type: NodeType.router,
+          globalCoordinates: routerCoords, 
+          localX: localCoords['x']!, 
+          localY: localCoords['y']!,
+          macAddress: macAddress, 
+        ));
+      }
+
+      // 3. Storage phase
+      _printDebugGrid();
+      saveGridToDisk(); 
       
-      buildingCorners.add(IpsNode(
-        id: 'corner_$i', 
-        type: i == 0 ? NodeType.origin : NodeType.corner,
-        globalCoordinates: corners[i], 
-        localX: localCoords['x']!, 
-        localY: localCoords['y']!,
-      ));
+      return true; // Success!
+
+    } catch (e) {
+      print("AnchorManager Error processing data: $e");
+      return false; // Something went wrong during extraction or math
     }
-
-    // Process Routers (Now unpacks the Map to extract LatLng and MAC)
-    for (int i = 0; i < routers.length; i++) {
-      final LatLng routerCoords = routers[i]['latLng'] as LatLng;
-      final String macAddress = routers[i]['macAddress'] as String;
-
-      final localCoords = CoordinateConverter.toLocalCartesian(
-        target: routerCoords, 
-        origin: _originPoint!
-      );
-      
-      wifiRouters.add(IpsNode(
-        id: 'router_$i', 
-        type: NodeType.router,
-        globalCoordinates: routerCoords, 
-        localX: localCoords['x']!, 
-        localY: localCoords['y']!,
-        macAddress: macAddress, // Inject the MAC address into the data model
-      ));
-    }
-
-    _printDebugGrid();
-    saveGridToDisk(); 
   }
-
+  
   Future<void> saveGridToDisk() async {
     final prefs = await SharedPreferences.getInstance();
     
