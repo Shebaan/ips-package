@@ -1,14 +1,17 @@
 import 'package:flutter/material.dart';
 import '../models/ips_node.dart';
+import '../services/location_engine.dart';
 
 class LocalisedMapScreen extends StatefulWidget {
   final List<IpsNode> corners;
   final List<IpsNode> routers;
+  final LocationEngine? locationEngine;
 
   const LocalisedMapScreen({
     Key? key,
     required this.corners,
     required this.routers,
+    this.locationEngine,
   }) : super(key: key);
 
   @override
@@ -16,13 +19,15 @@ class LocalisedMapScreen extends StatefulWidget {
 }
 
 class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
-  // 1. This controller allows us to manipulate the camera programmatically
+  // This controller allows us to manipulate the camera programmatically
   final TransformationController _transformationController = TransformationController();
+  // The current rotation of the map in radians
+  double _rotationAngle = 0.0;
 
   @override
   void initState() {
     super.initState();
-    // 2. The microsecond the screen finishes drawing, zoom out and center!
+    // Once the screen finishes drawing, zoom out and center
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _resetAndCenterView();
     });
@@ -34,7 +39,7 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
     super.dispose();
   }
 
-  // 3. The Math to center the massive 3000x3000 canvas and zoom out
+  // Math to center the massive 3000x3000 canvas and zoom out
   void _resetAndCenterView() {
     final screenWidth = MediaQuery.of(context).size.width;
     final screenHeight = MediaQuery.of(context).size.height;
@@ -49,12 +54,23 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
       ..scale(targetScale);
   }
 
-  // 4. The math to handle manual zoom button clicks
+  // The math to handle manual zoom button clicks
   void _zoom(double factor) {
     final matrix = _transformationController.value.clone();
     // Multiply the current zoom level by the factor
     matrix.scale(factor, factor, 1.0);
     _transformationController.value = matrix;
+  }
+
+  void _rotate(bool clockwise) {
+    setState(() {
+      // 0.785398 radians is exactly 45 degrees
+      if (clockwise) {
+        _rotationAngle += 0.785398;
+      } else {
+        _rotationAngle -= 0.785398;
+      }
+    });
   }
 
   @override
@@ -65,7 +81,7 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
         backgroundColor: Colors.blueGrey,
         foregroundColor: Colors.white,
       ),
-      // Use a Stack so we can float buttons over the map
+      // Use a Stack to float buttons over the map
       body: Stack(
         children: [
           // THE MAP
@@ -74,20 +90,65 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
             boundaryMargin: const EdgeInsets.all(double.infinity),
             minScale: 0.05, // Allowed to zoom out extremely far
             maxScale: 5.0,
-            constrained: false, // Critical for massive canvases!
-            child: CustomPaint(
-              size: const Size(3000, 3000),
-              // Note: We use widget.corners since we are inside a StatefulWidget now
-              painter: FloorplanPainter(corners: widget.corners, routers: widget.routers),
-            ),
+            constrained: false,
+            
+            // Wrap the CustomPaint in a listener so it redraws live
+            child: widget.locationEngine == null 
+              ? Transform.rotate(
+                  angle: _rotationAngle, // <-- APPLIED ROTATION HERE
+                  child: CustomPaint(
+                    size: const Size(3000, 3000),
+                    painter: FloorplanPainter(
+                      corners: widget.corners, 
+                      routers: widget.routers,
+                      userPos: null, // No live tracking active
+                    ),
+                  ),
+                )
+              : ValueListenableBuilder<Map<String, double>?>(
+                  valueListenable: widget.locationEngine!.liveLocalPosition,
+                  builder: (context, livePos, child) {
+                    return Transform.rotate(
+                      angle: _rotationAngle, // <-- APPLIED ROTATION HERE
+                      child: CustomPaint(
+                        size: const Size(3000, 3000),
+                        painter: FloorplanPainter(
+                          corners: widget.corners, 
+                          routers: widget.routers,
+                          userPos: livePos, // Feed the live coordinates to the painter
+                        ),
+                      ),
+                    );
+                  },
+                ),
           ),
 
-          // THE ZOOM BUTTONS
+          // THE ZOOM & ROTATE BUTTONS
           Positioned(
             bottom: 30,
             right: 20,
             child: Column(
               children: [
+                // <-- ADDED ROTATE BUTTONS HERE
+                FloatingActionButton(
+                  heroTag: 'rotate_left',
+                  mini: true,
+                  backgroundColor: Colors.blueGrey,
+                  foregroundColor: Colors.white,
+                  onPressed: () => _rotate(false),
+                  child: const Icon(Icons.rotate_left),
+                ),
+                const SizedBox(height: 10),
+                FloatingActionButton(
+                  heroTag: 'rotate_right',
+                  mini: true,
+                  backgroundColor: Colors.blueGrey,
+                  foregroundColor: Colors.white,
+                  onPressed: () => _rotate(true),
+                  child: const Icon(Icons.rotate_right),
+                ),
+                const SizedBox(height: 10),
+                // Existing Zoom Buttons
                 FloatingActionButton(
                   heroTag: 'zoom_in',
                   mini: true,
@@ -119,14 +180,20 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
   }
 }
 
-// THE PAINTER (Exactly the same math as before)
+// THE PAINTER 
 class FloorplanPainter extends CustomPainter {
   final List<IpsNode> corners;
   final List<IpsNode> routers;
+  final Map<String, double>? userPos; // Added user position variable
   
   final double scale = 20.0; 
 
-  FloorplanPainter({required this.corners, required this.routers});
+  // Updated constructor
+  FloorplanPainter({
+    required this.corners, 
+    required this.routers,
+    required this.userPos,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -195,8 +262,34 @@ class FloorplanPainter extends CustomPainter {
         ..strokeWidth = 2.0;
       canvas.drawCircle(Offset(px, py), 25.0, ringPaint);
     }
+
+    // 6. DRAW THE LIVE USER LOCATION
+    if (userPos != null) {
+      // Use the exact same scale/center math to plot the user's local X/Y
+      final px = center.dx + (userPos!['x']! * scale);
+      final py = center.dy - (userPos!['y']! * scale);
+      
+      // Draw a soft pulsing halo
+      final haloPaint = Paint()..color = Colors.blue.withOpacity(0.3);
+      canvas.drawCircle(Offset(px, py), 20.0, haloPaint);
+
+      // Draw the solid center dot
+      final userDotPaint = Paint()..color = Colors.blueAccent;
+      canvas.drawCircle(Offset(px, py), 10.0, userDotPaint);
+      
+      // Add a white border to make it pop against the grid
+      final userBorder = Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0;
+      canvas.drawCircle(Offset(px, py), 10.0, userBorder);
+    }
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true; 
+  // Ensure it repaints whenever the data changes!
+  bool shouldRepaint(covariant FloorplanPainter oldDelegate) {
+    return oldDelegate.userPos?['x'] != userPos?['x'] || 
+           oldDelegate.userPos?['y'] != userPos?['y'];
+  } 
 }

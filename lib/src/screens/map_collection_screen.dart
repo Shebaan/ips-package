@@ -118,9 +118,12 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
               ),
               const SizedBox(height: 16),
               ElevatedButton.icon(
-                onPressed: _scanForWifiNetworks, // Updated to call the scanner
+                onPressed: _scanForWifiNetworks,
                 icon: const Icon(Icons.wifi_find),
-                label: const Text('Scan Nearby Networks'),
+                label: const FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text('Scan Nearby Networks'),
+                ),
                 style: ElevatedButton.styleFrom(
                   minimumSize: const Size(double.infinity, 40),
                 ),

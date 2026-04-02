@@ -22,7 +22,6 @@ class IpsTestApp extends StatelessWidget {
   }
 }
 
-// 1. Upgraded to StatefulWidget so it can remember data!
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
 
@@ -31,17 +30,30 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // 2. These variables live at the class level now, so ALL functions can see them.
+  // 1. Core Services
   final AnchorManager _anchorManager = AnchorManager();
+  late final LocationEngine _locationEngine;
+
+  // 2. UI State Variables
   bool _hasSavedGrid = false;
+  bool _isTracking = false;
 
   @override
   void initState() {
     super.initState();
+    // Initialize the new Week 2 Location Engine
+    _locationEngine = LocationEngine(anchorManager: _anchorManager);
     _checkSavedData();
   }
 
-  // 3. Automatically check the hard drive when the app opens
+  @override
+  void dispose() {
+    // CRITICAL: Stop the background scanner when the app closes to save battery
+    _locationEngine.stopTracking();
+    super.dispose();
+  }
+
+  // Automatically check the hard drive when the app opens
   Future<void> _checkSavedData() async {
     final hasData = await _anchorManager.loadGridFromDisk();
     setState(() {
@@ -49,10 +61,10 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  // W1: Setup Building & Routers
   void _startSetup(BuildContext context) async {
     print("Opening Map Screen...");
     
-    // Removed 'const' here
     final result = await Navigator.push(
       context,
       MaterialPageRoute(builder: (context) => MapCollectionScreen()),
@@ -68,7 +80,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (result is Map<String, dynamic>) {
       print("Handing off raw data to AnchorManager for validation and processing...");
       
-      // Hand the raw dictionary straight to the service layer
       final bool isSuccess = _anchorManager.processBuildingData(result);
 
       if (isSuccess) {
@@ -91,7 +102,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // 6. Matched the UK spelling!
+  // W1: View Localised 2D Map
   void _viewLocalisedMap(BuildContext context) {
     if (!_hasSavedGrid) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -106,6 +117,7 @@ class _HomeScreenState extends State<HomeScreen> {
         builder: (context) => LocalisedMapScreen(
           corners: _anchorManager.buildingCorners,
           routers: _anchorManager.wifiRouters,
+          locationEngine: _locationEngine,
         ),
       ),
     );
@@ -118,33 +130,112 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('IPS Package Tester'),
       ),
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            ElevatedButton.icon(
-              onPressed: () => _startSetup(context),
-              icon: const Icon(Icons.add_location_alt),
-              label: const Text('Start Map Setup', style: TextStyle(fontSize: 18)),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                backgroundColor: Colors.blue,
-                foregroundColor: Colors.white,
+        child: SingleChildScrollView( // Added scroll view in case the screen gets cramped
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // --- WEEK 1 FEATURES ---
+              ElevatedButton.icon(
+                onPressed: () => _startSetup(context),
+                icon: const Icon(Icons.add_location_alt),
+                label: const Text('Start Map Setup', style: TextStyle(fontSize: 18)),
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size(250, 50),
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                ),
               ),
-            ),
-            
-            const SizedBox(height: 20),
-            
-            ElevatedButton.icon(
-              onPressed: () => _viewLocalisedMap(context),
-              icon: const Icon(Icons.architecture),
-              label: const Text('View Localised Map', style: TextStyle(fontSize: 18)),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                backgroundColor: Colors.green,
-                foregroundColor: Colors.white,
+              
+              const SizedBox(height: 20),
+              
+              ElevatedButton.icon(
+                onPressed: () => _viewLocalisedMap(context),
+                icon: const Icon(Icons.architecture),
+                label: const Text('View Localised Map', style: TextStyle(fontSize: 18)),
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size(250, 50),
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                ),
               ),
-            ),
-          ],
+
+              const SizedBox(height: 40),
+
+              // --- WEEK 2 FEATURES ---
+              // Only show the live tracking UI if a building has actually been mapped
+              if (_hasSavedGrid) ...[
+                const Divider(thickness: 2, indent: 40, endIndent: 40),
+                const SizedBox(height: 20),
+                
+                ElevatedButton.icon(
+                  icon: Icon(_isTracking ? Icons.stop : Icons.play_arrow),
+                  label: Text(
+                    _isTracking ? 'Stop Live Tracking' : 'Start Live Tracking',
+                    style: const TextStyle(fontSize: 18)
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    minimumSize: const Size(250, 50),
+                    backgroundColor: _isTracking ? Colors.red : Colors.orange,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      _isTracking = !_isTracking;
+                      if (_isTracking) {
+                        _locationEngine.startTracking();
+                      } else {
+                        _locationEngine.stopTracking();
+                      }
+                    });
+                  },
+                ),
+                
+                const SizedBox(height: 30),
+
+                // Live Coordinate Display Listens to the Engine
+                ValueListenableBuilder(
+                  valueListenable: _locationEngine.liveLocation,
+                  builder: (context, location, child) {
+                    if (!_isTracking) {
+                      return const Text(
+                        'Tracker Stopped',
+                        style: TextStyle(fontSize: 16, color: Colors.grey),
+                      );
+                    }
+                    if (location == null) {
+                      return const Text(
+                        'Scanning for routers...',
+                        style: TextStyle(fontSize: 16, fontStyle: FontStyle.italic),
+                      );
+                    }
+                    
+                    return Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.blue),
+                      ),
+                      child: Column(
+                        children: [
+                          const Text(
+                            '📍 Live Position',
+                            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            'Lat: ${location.latitude.toStringAsFixed(6)}\nLng: ${location.longitude.toStringAsFixed(6)}',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(fontSize: 18, fontFamily: 'monospace'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );
