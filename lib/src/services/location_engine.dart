@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:wifi_scan/wifi_scan.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -18,20 +19,26 @@ class LocationEngine {
   final ValueNotifier<Map<String, double>?> liveLocalPosition = ValueNotifier(null);
 
   LocationEngine({required this.anchorManager});
-  final bool isSimulationMode = false;
+
+  // Simulation mode allows testing without using real WiFi scanning hardware.
+  // Simulates a guard walking in a loop from router to router.
+  final bool isSimulationMode = false; 
+  
+  // Tracks the passage of time for the simulation patrol route
+  int _simTick = 0;
 
   void startTracking() {
     if (_scanTimer != null && _scanTimer!.isActive) return;
     
     print("Starting Live IPS Tracking...");
     
-    // Scan every 3 seconds (Requires Wi-Fi Throttling to be OFF in Android Dev Options)
+    // Trigger the first scan immediately so the UI updates instantly
+    _performLocationUpdate();
+
+    // Scan every 3 seconds 
     _scanTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       _performLocationUpdate();
     });
-    
-    // Trigger the first scan immediately
-    _performLocationUpdate();
   }
 
   void stopTracking() {
@@ -45,25 +52,49 @@ class LocationEngine {
 
     if (isSimulationMode) {
       // ---------------------------------------------------------
-      // SIMULATION MODE: Bypass the missing iOS Simulator antenna
+      // SIMULATION MODE: The Walking Ghost Patrol
       // ---------------------------------------------------------
       if (anchorManager.wifiRouters.isEmpty) {
         print("Simulator: No routers saved in AnchorManager.");
         return;
       }
 
-      print("Simulator: Generating mock Wi-Fi signals...");
-      
-      // Generate a fake signal for every router you saved on your map
-      for (int i = 0; i < anchorManager.wifiRouters.length; i++) {
-        final knownRouter = anchorManager.wifiRouters[i];
-        
-        // Fake RSSI Logic: Pretend we are very close to the first router (-45dBm)
-        // and further away from the others (-65dBm, -70dBm). 
-        int mockRssi = (i == 0) ? -45 : -60 - (i * 5);
+      final int numRouters = anchorManager.wifiRouters.length;
+      // If you only have 1 router mapped, it can't walk anywhere!
+      if (numRouters < 2) return; 
 
-        // Pass the fake RSSI into the math engine
-        final distance = MathUtils.calculateDistance(mockRssi, RfEnvironment.wifiOffice);
+      final int stepsPerLeg = 10; // Takes 10 engine ticks (approx 30 sec) to walk to the next router
+
+      // Calculate which router we are leaving, and which one we are walking to
+      int currentLeg = (_simTick ~/ stepsPerLeg) % numRouters;
+      int nextLeg = (currentLeg + 1) % numRouters;
+      
+      // Calculate how far along the path we are (0.0 to 1.0)
+      double progress = (_simTick % stepsPerLeg) / stepsPerLeg;
+
+      print("Simulator: Walking from Router ${currentLeg + 1} to Router ${nextLeg + 1} (Progress: ${(progress * 100).toInt()}%)");
+
+      final random = Random();
+
+      for (int i = 0; i < numRouters; i++) {
+        final knownRouter = anchorManager.wifiRouters[i];
+        double simulatedRssi;
+
+        if (i == currentLeg) {
+          // Walking AWAY from this router (Fading from -45 down to -75)
+          simulatedRssi = -45.0 - (30.0 * progress);
+        } else if (i == nextLeg) {
+          // Walking TOWARDS this router (Fading from -75 up to -45)
+          simulatedRssi = -75.0 + (30.0 * progress);
+        } else {
+          // We are far away from all other routers
+          simulatedRssi = -75.0;
+        }
+
+        // Add a tiny bit of +/- 2 jitter so the walk looks human and organic
+        int finalRssi = simulatedRssi.toInt() + (random.nextInt(5) - 2);
+
+        final distance = MathUtils.calculateDistance(finalRssi, RfEnvironment.wifiOffice);
 
         usableAnchors.add({
           'x': knownRouter.localX,
@@ -71,6 +102,10 @@ class LocationEngine {
           'distance': distance,
         });
       }
+
+      // Advance the simulation clock for the next update!
+      _simTick++; 
+      
     } else {
       // ---------------------------------------------------------
       // PRODUCTION MODE: Real hardware scanning (Requires physical device)
@@ -128,5 +163,4 @@ class LocationEngine {
     // 7. Broadcast the live GPS coordinates to the UI
     liveLocation.value = globalPos;
   }
-
 }

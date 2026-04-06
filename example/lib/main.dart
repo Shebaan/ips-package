@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:ips_package/src/services/ips_integration_service.dart';
+import 'mock_dispatcher_screen.dart';
 
 // Import your package UI and logic
 import 'package:ips_package/ips_package.dart';
@@ -33,6 +35,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // 1. Core Services
   final AnchorManager _anchorManager = AnchorManager();
   late final LocationEngine _locationEngine;
+  late IpsIntegrationService _ipsService;
 
   // 2. UI State Variables
   bool _hasSavedGrid = false;
@@ -41,9 +44,32 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // Initialize the new Week 2 Location Engine
     _locationEngine = LocationEngine(anchorManager: _anchorManager);
+    _ipsService = IpsIntegrationService(locationEngine: _locationEngine); 
     _checkSavedData();
+  }
+
+  void _openDispatcherDashboard() {
+    if (!_hasSavedGrid) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please run Map Setup first')),
+      );
+      return;
+    }
+
+    // Convert our local IPS nodes into Global LatLngs for the Google Map Geofence
+    final safeZone = _anchorManager.buildingCorners
+        .map((node) => node.globalCoordinates!)
+        .toList();
+
+    _ipsService.setPatrolZone(safeZone);
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => MockDispatcherScreen(integrationService: _ipsService),
+      ),
+    );
   }
 
   @override
@@ -155,6 +181,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 style: ElevatedButton.styleFrom(
                   minimumSize: const Size(250, 50),
                   backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+
+              ElevatedButton.icon(
+                onPressed: _openDispatcherDashboard,
+                icon: const Icon(Icons.admin_panel_settings),
+                label: const Text('View HQ Dashboard', style: TextStyle(fontSize: 18)),
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size(250, 50),
+                  backgroundColor: Colors.redAccent,
                   foregroundColor: Colors.white,
                 ),
               ),
