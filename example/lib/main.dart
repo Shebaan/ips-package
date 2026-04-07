@@ -57,7 +57,6 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    // Convert our local IPS nodes into Global LatLngs for the Google Map Geofence
     final safeZone = _anchorManager.buildingCorners
         .map((node) => node.globalCoordinates!)
         .toList();
@@ -74,12 +73,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
-    // CRITICAL: Stop the background scanner when the app closes to save battery
     _locationEngine.stopTracking();
     super.dispose();
   }
 
-  // Automatically check the hard drive when the app opens
   Future<void> _checkSavedData() async {
     final hasData = await _anchorManager.loadGridFromDisk();
     setState(() {
@@ -87,7 +84,6 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  // W1: Setup Building & Routers
   void _startSetup(BuildContext context) async {
     print("Opening Map Screen...");
     
@@ -110,7 +106,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (isSuccess) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Successfully mapped building and saved Wi-Fi anchors!')),
+          // Text updated to reflect new hardware types
+          const SnackBar(content: Text('Successfully mapped building and saved hardware anchors!')),
         );
         setState(() {
           _hasSavedGrid = true;
@@ -128,7 +125,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // W1: View Localised 2D Map
   void _viewLocalisedMap(BuildContext context) {
     if (!_hasSavedGrid) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -142,7 +138,8 @@ class _HomeScreenState extends State<HomeScreen> {
       MaterialPageRoute(
         builder: (context) => LocalisedMapScreen(
           corners: _anchorManager.buildingCorners,
-          routers: _anchorManager.wifiRouters,
+          // --- THE FIX: Pass the new hardwareAnchors list ---
+          routers: _anchorManager.hardwareAnchors, 
           locationEngine: _locationEngine,
         ),
       ),
@@ -156,11 +153,10 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('IPS Package Tester'),
       ),
       body: Center(
-        child: SingleChildScrollView( // Added scroll view in case the screen gets cramped
+        child: SingleChildScrollView( 
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // --- WEEK 1 FEATURES ---
               ElevatedButton.icon(
                 onPressed: () => _startSetup(context),
                 icon: const Icon(Icons.add_location_alt),
@@ -185,6 +181,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
 
+              const SizedBox(height: 20),
+
               ElevatedButton.icon(
                 onPressed: _openDispatcherDashboard,
                 icon: const Icon(Icons.admin_panel_settings),
@@ -198,8 +196,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
               const SizedBox(height: 40),
 
-              // --- WEEK 2 FEATURES ---
-              // Only show the live tracking UI if a building has actually been mapped
               if (_hasSavedGrid) ...[
                 const Divider(thickness: 2, indent: 40, endIndent: 40),
                 const SizedBox(height: 20),
@@ -229,21 +225,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 
                 const SizedBox(height: 30),
 
-                // Live Coordinate Display Listens to the Engine
                 ValueListenableBuilder(
                   valueListenable: _locationEngine.liveLocation,
                   builder: (context, location, child) {
                     if (!_isTracking) {
-                      return const Text(
-                        'Tracker Stopped',
-                        style: TextStyle(fontSize: 16, color: Colors.grey),
-                      );
+                      return const Text('Tracker Stopped', style: TextStyle(fontSize: 16, color: Colors.grey));
                     }
                     if (location == null) {
-                      return const Text(
-                        'Scanning for routers...',
-                        style: TextStyle(fontSize: 16, fontStyle: FontStyle.italic),
-                      );
+                      return const Text('Scanning for anchors...', style: TextStyle(fontSize: 16, fontStyle: FontStyle.italic));
                     }
                     
                     return Container(
@@ -255,10 +244,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       child: Column(
                         children: [
-                          const Text(
-                            '📍 Live Position',
-                            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                          ),
+                          const Text('📍 Live Position', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                           const SizedBox(height: 10),
                           Text(
                             'Lat: ${location.latitude.toStringAsFixed(6)}\nLng: ${location.longitude.toStringAsFixed(6)}',

@@ -100,7 +100,7 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
                     size: const Size(3000, 3000),
                     painter: FloorplanPainter(
                       corners: widget.corners, 
-                      routers: widget.routers,
+                      anchors: widget.routers,
                       userPos: null, // No live tracking active
                     ),
                   ),
@@ -114,7 +114,7 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
                         size: const Size(3000, 3000),
                         painter: FloorplanPainter(
                           corners: widget.corners, 
-                          routers: widget.routers,
+                          anchors: widget.routers,
                           userPos: livePos, // Feed the live coordinates to the painter
                         ),
                       ),
@@ -183,7 +183,7 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
 // THE PAINTER 
 class FloorplanPainter extends CustomPainter {
   final List<IpsNode> corners;
-  final List<IpsNode> routers;
+  final List<IpsNode> anchors;
   final Map<String, double>? userPos; // Added user position variable
   
   final double scale = 20.0; 
@@ -191,7 +191,7 @@ class FloorplanPainter extends CustomPainter {
   // Updated constructor
   FloorplanPainter({
     required this.corners, 
-    required this.routers,
+    required this.anchors,
     required this.userPos,
   });
 
@@ -249,15 +249,19 @@ class FloorplanPainter extends CustomPainter {
       }
     }
 
-    for (var router in routers) {
-      final px = center.dx + (router.localX * scale);
-      final py = center.dy - (router.localY * scale);
+    for (var anchor in anchors) {
+      final px = center.dx + (anchor.localX * scale);
+      final py = center.dy - (anchor.localY * scale);
       
-      nodePaint.color = Colors.deepOrange;
+      // Determine the color based on the hardware type!
+      final isBle = anchor.hardwareType == HardwareType.ble;
+      final Color baseColor = isBle ? Colors.deepPurple : Colors.deepOrange;
+      
+      nodePaint.color = baseColor;
       canvas.drawCircle(Offset(px, py), 10.0, nodePaint);
       
       final ringPaint = Paint()
-        ..color = Colors.deepOrange.withOpacity(0.4)
+        ..color = baseColor.withOpacity(0.4)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2.0;
       canvas.drawCircle(Offset(px, py), 25.0, ringPaint);

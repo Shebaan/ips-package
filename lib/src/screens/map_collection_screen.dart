@@ -1,46 +1,14 @@
 /// A fully interactive map screen for collecting Indoor Positioning System (IPS) anchors.
-/// 
-/// This screen walks the user through a two-step process:
-/// 1. Defining the building perimeter (creating an N-sided polygon).
-/// 2. Placing internal Wi-Fi routers (RF anchors) and capturing their MAC addresses.
-/// 
-/// ### Prerequisites for the Host App:
-/// * **Android:** Google Maps API key in `AndroidManifest.xml` & Location permissions.
-/// * **iOS:** Google Maps API key in `AppDelegate.swift` & Location permissions in `Info.plist`.
-/// 
-/// ### How to Start & Check Return Data:
-/// Launch this screen using `Navigator.push`. Because the user might cancel or 
-/// complete the setup, you should `await` the result.
-/// 
-/// Example usage:
-// import 'package:ips_package/src/services/anchor_manager.dart';
-//
-// void _startSetup(BuildContext context) async {
-//   final result = await Navigator.push(
-//     context,
-//     MaterialPageRoute(builder: (context) => MapCollectionScreen()),
-//   );
-//
-//   if (result != null) {
-//     final Map<String, dynamic> data = Map<String, dynamic>.from(result as Map);
-//     final List<LatLng> corners = List<LatLng>.from(data['corners']);
-//     final List<Map<String, dynamic>> routers = List<Map<String, dynamic>>.from(data['routers']);
-//
-//     final anchorManager = AnchorManager();
-//     anchorManager.processBuildingData(corners: corners, routers: routers);
-//   }
-// }
-//
-/// ### How to Exit:
-/// * **Cancel/Abort:** The user can press the standard back button in the AppBar. This returns `null`.
-/// * **Finish/Save:** The user taps "Finish" on the routers phase. Returns a `Map<String, dynamic>`.
+/// Supports both Wi-Fi Routers and Bluetooth Low Energy (BLE) Beacons.
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:wifi_scan/wifi_scan.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
-enum CollectionPhase { corners, routers }
+enum CollectionPhase { corners, anchors }
 
 class MapCollectionScreen extends StatefulWidget {
   @override
@@ -49,18 +17,21 @@ class MapCollectionScreen extends StatefulWidget {
 
 class _MapCollectionScreenState extends State<MapCollectionScreen> {
   GoogleMapController? _mapController;
-  final TextEditingController _macController = TextEditingController();
+  final TextEditingController _hardwareIdController = TextEditingController();
   
   CollectionPhase _currentPhase = CollectionPhase.corners;
   
   List<LatLng> _buildingCorners = [];
-  // Updated to hold both coordinates and MAC address
-  List<Map<String, dynamic>> _routerLocations = [];
+  List<Map<String, dynamic>> _hardwareLocations = [];
   bool _isPerimeterClosed = false;
+  String _selectedHardwareType = 'WIFI'; 
+  // Remembers where the user tapped while switching between dialogs!
+  LatLng? _currentTappedPoint;
+  bool _hasLocationPermission = false;
 
   @override
   void dispose() {
-    _macController.dispose();
+    _hardwareIdController.dispose();
     super.dispose();
   }
 
@@ -70,160 +41,177 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
       if (permission == LocationPermission.denied) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Location permissions are denied.')),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location permissions are denied.')));
         return;
       }
     }
     
     if (permission == LocationPermission.deniedForever) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Location permissions are permanently denied. Please enable in settings.')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location permissions are permanently denied. Please enable in settings.')));
       return;
     }
 
-    Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high);
-    
+    // Turn on the Google Map's blue dot safely!
+    setState(() {
+      _hasLocationPermission = true;
+    });
+
+    Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
     _addPoint(LatLng(position.latitude, position.longitude));
-    
-    _mapController?.animateCamera(CameraUpdate.newLatLng(
-      LatLng(position.latitude, position.longitude)
-    ));
+    _mapController?.animateCamera(CameraUpdate.newLatLng(LatLng(position.latitude, position.longitude)));
   }
 
-  /// Displays the dialog to capture Wi-Fi fingerprint data
-  Future<void> _showWifiDialog(LatLng tappedPoint) async {
-    _macController.clear();
+  /// Displays the dialog to capture Wi-Fi or BLE fingerprint data
+  Future<void> _showHardwareDialog() async {
 
     await showDialog(
       context: context,
       barrierDismissible: false,
       builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text('Add Wi-Fi Router'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('Enter the MAC Address (BSSID) for this router, or scan nearby networks.'),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _macController,
-                decoration: const InputDecoration(
-                  labelText: 'MAC Address (e.g., 00:1A:2B:3C:4D:5E)',
-                  border: OutlineInputBorder(),
-                ),
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: const Text('Add Hardware Anchor'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'WIFI', label: Text('Wi-Fi'), icon: Icon(Icons.wifi)),
+                      ButtonSegment(value: 'BLE', label: Text('BLE'), icon: Icon(Icons.bluetooth)),
+                    ],
+                    selected: {_selectedHardwareType},
+                    onSelectionChanged: (Set<String> newSelection) {
+                      setStateDialog(() {
+                        _selectedHardwareType = newSelection.first;
+                        _hardwareIdController.clear();
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _hardwareIdController,
+                    decoration: InputDecoration(
+                      labelText: _selectedHardwareType == 'WIFI' ? 'MAC Address' : 'Beacon UUID / MAC',
+                      border: const OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(context); 
+                      if (_selectedHardwareType == 'WIFI') {
+                        _scanForWifiNetworks();
+                      } else {
+                        _scanForBluetoothBeacons();
+                      }
+                    },
+                    icon: Icon(_selectedHardwareType == 'WIFI' ? Icons.wifi_find : Icons.bluetooth_searching),
+                    label: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text('Scan Nearby ${_selectedHardwareType == 'WIFI' ? 'Networks' : 'Beacons'}'),
+                    ),
+                    style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 40)),
+                  ),
+                ],
               ),
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                onPressed: _scanForWifiNetworks,
-                icon: const Icon(Icons.wifi_find),
-                label: const FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Text('Scan Nearby Networks'),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+                ElevatedButton(
+                  onPressed: () {
+                    setState(() {
+                      _hardwareLocations.add({
+                        'latLng': _currentTappedPoint!, // Use the saved tap location
+                        'hardwareId': _hardwareIdController.text.trim().isEmpty ? 'UNKNOWN' : _hardwareIdController.text.trim(),
+                        'hardwareType': _selectedHardwareType,
+                      });
+                    });
+                    Navigator.pop(context);
+                  },
+                  child: const Text('Save Anchor'),
                 ),
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size(double.infinity, 40),
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                setState(() {
-                  _routerLocations.add({
-                    'latLng': tappedPoint,
-                    'macAddress': _macController.text.trim().isEmpty ? 'UNKNOWN' : _macController.text.trim(),
-                  });
-                });
-                Navigator.pop(context);
-              },
-              child: const Text('Save Router'),
-            ),
-          ],
+              ],
+            );
+          }
         );
       },
     );
   }
 
   Future<void> _scanForWifiNetworks() async {
-    // 1. Check if the device is capable of scanning
     final canStartScan = await WiFiScan.instance.canStartScan();
-    
     if (canStartScan != CanStartScan.yes) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Wi-Fi scanning is not supported or permitted on this device. Code: $canStartScan')),
-        );
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Wi-Fi scanning not supported.')));
       return;
     }
 
-    // 2. Trigger the hardware scan
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Scanning for networks...')),
-      );
-    }
-    
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Scanning Wi-Fi...')));
     await WiFiScan.instance.startScan();
-    
-    // 3. Retrieve the results
-    final List<WiFiAccessPoint> accessPoints = await WiFiScan.instance.getScannedResults();
+    final results = await WiFiScan.instance.getScannedResults();
+    results.sort((a, b) => b.level.compareTo(a.level));
 
-    if (accessPoints.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No networks found. Ensure Wi-Fi is enabled.')),
-        );
-      }
-      return;
-    }
-
-    // Sort by signal strength (strongest first)
-    accessPoints.sort((a, b) => b.level.compareTo(a.level));
-
-    // 4. Display the results in a Bottom Sheet
     if (!mounted) return;
+    _showResultsSheet(
+      title: 'Wi-Fi Networks',
+      items: results.map((r) => {'name': r.ssid.isEmpty ? 'Hidden Network' : r.ssid, 'id': r.bssid, 'signal': '${r.level} dBm'}).toList(),
+      type: 'WIFI'
+    );
+  }
+
+  Future<void> _scanForBluetoothBeacons() async {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Scanning Bluetooth...')));
     
+    List<ScanResult> bleResults = [];
+    var subscription = FlutterBluePlus.onScanResults.listen((results) {
+      bleResults = results;
+    });
+
+    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
+    await Future.delayed(const Duration(seconds: 4));
+    subscription.cancel();
+
+    bleResults.sort((a, b) => b.rssi.compareTo(a.rssi));
+
+    if (!mounted) return;
+    _showResultsSheet(
+      title: 'BLE Beacons',
+      items: bleResults.map((r) => {'name': r.device.advName.isEmpty ? 'Unknown Beacon' : r.device.advName, 'id': r.device.remoteId.str, 'signal': '${r.rssi} dBm'}).toList(),
+      type: 'BLE'
+    );
+  }
+
+  void _showResultsSheet({required String title, required List<Map<String, String>> items, required String type}) {
     showModalBottomSheet(
       context: context,
       builder: (BuildContext context) {
         return Column(
           children: [
-            const Padding(
-              padding: EdgeInsets.all(16.0),
-              child: Text(
-                'Nearby Networks',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             ),
             Expanded(
-              child: ListView.builder(
-                itemCount: accessPoints.length,
-                itemBuilder: (context, index) {
-                  final ap = accessPoints[index];
-                  return ListTile(
-                    leading: const Icon(Icons.wifi),
-                    title: Text(ap.ssid.isNotEmpty ? ap.ssid : 'Hidden Network'),
-                    subtitle: Text('MAC: ${ap.bssid} | Signal: ${ap.level} dBm'),
-                    onTap: () {
-                      // Auto-fill the text field and close the bottom sheet
-                      setState(() {
-                        _macController.text = ap.bssid;
-                      });
-                      Navigator.pop(context);
-                    },
-                  );
-                },
-              ),
+              child: items.isEmpty
+                  ? const Center(child: Text('No devices found.'))
+                  : ListView.builder(
+                      itemCount: items.length,
+                      itemBuilder: (context, index) {
+                        final item = items[index];
+                        return ListTile(
+                          leading: Icon(type == 'WIFI' ? Icons.wifi : Icons.bluetooth),
+                          title: Text(item['name']!),
+                          subtitle: Text('ID: ${item['id']} | Signal: ${item['signal']}'),
+                          onTap: () {
+                            setState(() {
+                              _hardwareIdController.text = item['id']!;
+                              _selectedHardwareType = type;
+                            });
+                            Navigator.pop(context);
+                            _showHardwareDialog(); // Re-open dialog without needing coordinates
+                          },
+                        );
+                      },
+                    ),
             ),
           ],
         );
@@ -237,18 +225,18 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
         if (!_isPerimeterClosed) {
           _buildingCorners.add(point);
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Perimeter is locked! Undo to edit, or tap Next.')),
-          );
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Perimeter is locked! Undo to edit, or tap Next.')));
         }
       });
     } else {
-      // Trigger dialog instead of immediate placement
-      _showWifiDialog(point);
+      _currentTappedPoint = point; // Save the point globally
+
+      _hardwareIdController.clear();
+      _selectedHardwareType = 'WIFI';
+      _showHardwareDialog();
     }
   }
 
-  // Undo Logic
   void _undoLast() {
     setState(() {
       if (_currentPhase == CollectionPhase.corners) {
@@ -257,17 +245,16 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
         } else if (_buildingCorners.isNotEmpty) {
           _buildingCorners.removeLast();
         }
-      } else if (_currentPhase == CollectionPhase.routers && _routerLocations.isNotEmpty) {
-        _routerLocations.removeLast();
+      } else if (_currentPhase == CollectionPhase.anchors && _hardwareLocations.isNotEmpty) {
+        _hardwareLocations.removeLast();
       }
     });
   }
 
-  // Reset everything back to zero
   void _resetAll() {
     setState(() {
       _buildingCorners.clear();
-      _routerLocations.clear();
+      _hardwareLocations.clear();
       _isPerimeterClosed = false;
       _currentPhase = CollectionPhase.corners;
     });
@@ -278,41 +265,31 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
 
     for (int i = 0; i < _buildingCorners.length; i++) {
       bool isOrigin = (i == 0);
-      markers.add(
-        Marker(
-          markerId: MarkerId('corner_$i'),
-          position: _buildingCorners[i],
-          icon: BitmapDescriptor.defaultMarkerWithHue(
-            isOrigin ? BitmapDescriptor.hueGreen : BitmapDescriptor.hueBlue,
-          ),
-          infoWindow: InfoWindow(title: isOrigin ? 'Origin Node (0,0)' : 'Corner ${i + 1}'),
-          onTap: () {
-            if (isOrigin && _currentPhase == CollectionPhase.corners && _buildingCorners.length >= 3) {
-              setState(() {
-                _isPerimeterClosed = true;
-              });
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Perimeter closed successfully!')),
-              );
-            }
-          },
-        ),
-      );
+      markers.add(Marker(
+        markerId: MarkerId('corner_$i'),
+        position: _buildingCorners[i],
+        icon: BitmapDescriptor.defaultMarkerWithHue(isOrigin ? BitmapDescriptor.hueGreen : BitmapDescriptor.hueBlue),
+        infoWindow: InfoWindow(title: isOrigin ? 'Origin Node (0,0)' : 'Corner ${i + 1}'),
+        onTap: () {
+          if (isOrigin && _currentPhase == CollectionPhase.corners && _buildingCorners.length >= 3) {
+            setState(() { _isPerimeterClosed = true; });
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Perimeter closed successfully!')));
+          }
+        },
+      ));
     }
 
-    // Updated to extract data from the Map structure
-    for (int i = 0; i < _routerLocations.length; i++) {
-      final pos = _routerLocations[i]['latLng'] as LatLng;
-      final mac = _routerLocations[i]['macAddress'] as String;
+    for (int i = 0; i < _hardwareLocations.length; i++) {
+      final pos = _hardwareLocations[i]['latLng'] as LatLng;
+      final hwId = _hardwareLocations[i]['hardwareId'] as String;
+      final hwType = _hardwareLocations[i]['hardwareType'] as String;
 
-      markers.add(
-        Marker(
-          markerId: MarkerId('router_$i'),
-          position: pos,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-          infoWindow: InfoWindow(title: 'Wi-Fi Router ${i + 1}', snippet: 'MAC: $mac'),
-        ),
-      );
+      markers.add(Marker(
+        markerId: MarkerId('anchor_$i'),
+        position: pos,
+        icon: BitmapDescriptor.defaultMarkerWithHue(hwType == 'BLE' ? BitmapDescriptor.hueViolet : BitmapDescriptor.hueOrange),
+        infoWindow: InfoWindow(title: '$hwType Anchor ${i + 1}', snippet: 'ID: $hwId'),
+      ));
     }
 
     return markers;
@@ -320,40 +297,23 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
 
   Set<Polyline> _buildPolylines() {
     if (_buildingCorners.length < 2) return {};
-
     List<LatLng> polylinePoints = List.from(_buildingCorners);
-    if (_isPerimeterClosed) {
-      polylinePoints.add(_buildingCorners.first); 
-    }
-
-    return {
-      Polyline(
-        polylineId: const PolylineId('building_perimeter'),
-        points: polylinePoints,
-        color: Colors.blueAccent,
-        width: 4,
-      )
-    };
+    if (_isPerimeterClosed) polylinePoints.add(_buildingCorners.first); 
+    return {Polyline(polylineId: const PolylineId('building_perimeter'), points: polylinePoints, color: Colors.blueAccent, width: 4)};
   }
 
-  // Save and Exit logic
   void _saveAndExit() {
     if (_buildingCorners.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('You must define a building perimeter first.')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You must define a building perimeter first.')));
       return;
     }
 
     final collectedData = {
       'corners': _buildingCorners,
-      'routers': _routerLocations,
+      'routers': _hardwareLocations, // Key remains 'routers' to map directly to AnchorManager ingestion
     };
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Setup Complete!')),
-    );
-
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Setup Complete!')));
     if (Navigator.canPop(context)) {
       Navigator.pop(context, collectedData);
     }
@@ -363,36 +323,25 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_currentPhase == CollectionPhase.corners 
-            ? '1. Map Building Corners' 
-            : '2. Place Wi-Fi Routers', style: const TextStyle(fontSize: 18),),
+        title: Text(_currentPhase == CollectionPhase.corners ? '1. Map Building Corners' : '2. Place Hardware Anchors', style: const TextStyle(fontSize: 18)),
         backgroundColor: Colors.white,
         foregroundColor: Colors.black,
         actions: [
           if (_currentPhase == CollectionPhase.corners)
-            TextButton(
-              onPressed: () => setState(() => _currentPhase = CollectionPhase.routers),
-              child: const Text('Next', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16)),
-            )
+            TextButton(onPressed: () => setState(() => _currentPhase = CollectionPhase.anchors), child: const Text('Next', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16)))
           else
-            TextButton(
-              onPressed: _saveAndExit,
-              child: const Text('Finish', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16)),
-            )
+            TextButton(onPressed: _saveAndExit, child: const Text('Finish', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16)))
         ],
       ),
       body: Stack(
         children: [
           GoogleMap(
-            initialCameraPosition: const CameraPosition(
-              target: LatLng(51.5074, -0.1278), // Default to London
-              zoom: 15,
-            ),
+            initialCameraPosition: const CameraPosition(target: LatLng(51.5074, -0.1278), zoom: 15),
             onMapCreated: (controller) => _mapController = controller,
             onTap: _addPoint,
             markers: _buildMarkers(),
             polylines: _buildPolylines(),
-            myLocationEnabled: true,
+            myLocationEnabled: _hasLocationPermission,
             myLocationButtonEnabled: false, 
           ),
           
@@ -411,7 +360,7 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
                           : _isPerimeterClosed 
                               ? 'Perimeter locked. Tap Next to continue.'
                               : 'Keep placing nodes. Tap the Origin (Green) to close the shape.'
-                      : 'Place Wi-Fi routers inside the perimeter.',
+                      : 'Place Wi-Fi or BLE Anchors inside the perimeter.',
                   textAlign: TextAlign.center,
                   style: const TextStyle(fontWeight: FontWeight.w500),
                 ),
@@ -424,32 +373,11 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
         mainAxisAlignment: MainAxisAlignment.end,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          FloatingActionButton.extended(
-            heroTag: "btn_loc",
-            onPressed: _addCurrentLocation,
-            icon: const Icon(Icons.my_location),
-            label: const Text('Use My Location'),
-            backgroundColor: Colors.indigo,
-            foregroundColor: Colors.white,
-          ),
+          FloatingActionButton.extended(heroTag: "btn_loc", onPressed: _addCurrentLocation, icon: const Icon(Icons.my_location), label: const Text('Use My Location'), backgroundColor: Colors.indigo, foregroundColor: Colors.white),
           const SizedBox(height: 12),
-          FloatingActionButton.extended(
-            heroTag: "btn_undo",
-            onPressed: _undoLast,
-            icon: const Icon(Icons.undo),
-            label: const Text('Undo Last'),
-            backgroundColor: Colors.grey[800],
-            foregroundColor: Colors.white,
-          ),
+          FloatingActionButton.extended(heroTag: "btn_undo", onPressed: _undoLast, icon: const Icon(Icons.undo), label: const Text('Undo Last'), backgroundColor: Colors.grey[800], foregroundColor: Colors.white),
           const SizedBox(height: 12),
-          FloatingActionButton.extended(
-            heroTag: "btn_reset",
-            onPressed: _resetAll,
-            icon: const Icon(Icons.clear_all),
-            label: const Text('Reset All'),
-            backgroundColor: Colors.redAccent,
-            foregroundColor: Colors.white,
-          ),
+          FloatingActionButton.extended(heroTag: "btn_reset", onPressed: _resetAll, icon: const Icon(Icons.clear_all), label: const Text('Reset All'), backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
         ],
       ),
     );
