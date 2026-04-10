@@ -1,5 +1,5 @@
 /// A high-precision IPS collection screen using Crosshair-to-Map positioning.
-/// Features a forced 2D view and ironclad state preservation for hardware scanning.
+/// Features a forced 2D view, Auto-Grab functionality, and Device Name tracking.
 
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -18,6 +18,7 @@ class MapCollectionScreen extends StatefulWidget {
 class _MapCollectionScreenState extends State<MapCollectionScreen> {
   GoogleMapController? _mapController;
   final TextEditingController _hardwareIdController = TextEditingController();
+  final TextEditingController _hardwareNameController = TextEditingController(); 
   
   CollectionPhase _currentPhase = CollectionPhase.corners;
   
@@ -26,17 +27,17 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
   bool _isPerimeterClosed = false;
   String _selectedHardwareType = 'WIFI'; 
   
-  // Tracks the current center of the map for the crosshair
   LatLng _mapCenter = const LatLng(51.5074, -0.1278); 
   bool _hasLocationPermission = false;
+  bool _isAutoScanning = false; 
 
   @override
   void dispose() {
     _hardwareIdController.dispose();
+    _hardwareNameController.dispose();
     super.dispose();
   }
 
-  /// Moves the map camera to user's location without dropping a point
   Future<void> _goToMyLocation() async {
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
@@ -54,7 +55,6 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
     );
   }
 
-  /// Triggered by the main [+] button. Adds a point at the map's center.
   void _confirmSelectionAtCenter() {
     if (_currentPhase == CollectionPhase.corners) {
       if (_isPerimeterClosed) return;
@@ -65,18 +65,73 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Tap the Green Origin marker to close shape.')));
       }
     } else {
-      // THE CRITICAL FIX: Only wipe the text box clean on a FRESH [+] tap!
       _hardwareIdController.clear();
+      _hardwareNameController.clear();
       _selectedHardwareType = 'WIFI';
+      
+      // FIX 1: Force reset the loading state in case they cancelled early last time
+      _isAutoScanning = false; 
       
       _showHardwareDialog();
     }
   }
 
-  /// Displays dialog for hardware ID, using the map center as the coordinate
-  Future<void> _showHardwareDialog() async {
-    // Note: No .clear() here anymore, so it retains the ID from the scanner!
+  Future<void> _autoGrabStrongest(void Function(void Function()) setStateDialog) async {
+    setStateDialog(() => _isAutoScanning = true);
     
+    try {
+      if (_selectedHardwareType == 'WIFI') {
+        await WiFiScan.instance.startScan();
+        final results = await WiFiScan.instance.getScannedResults();
+        if (results.isNotEmpty) {
+          results.sort((a, b) => b.level.compareTo(a.level));
+          final best = results.first;
+          setStateDialog(() {
+            _hardwareIdController.text = best.bssid;
+            _hardwareNameController.text = best.ssid.isEmpty ? 'Hidden Network' : best.ssid;
+          });
+        } else {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No Wi-Fi networks found.')));
+        }
+      } else {
+        // BLE Auto-Grab
+        List<ScanResult> bleResults = [];
+        var subscription = FlutterBluePlus.onScanResults.listen((results) => bleResults = results);
+        
+        // FIX 2: Wrapped in try-catch to prevent CBManagerStateUnknown crash
+        await FlutterBluePlus.startScan(timeout: const Duration(seconds: 2));
+        await Future.delayed(const Duration(seconds: 2));
+        subscription.cancel();
+        
+        final filtered = bleResults.where((r) => r.device.advName.isNotEmpty).toList();
+        if (filtered.isNotEmpty) {
+          filtered.sort((a, b) => b.rssi.compareTo(a.rssi));
+          final best = filtered.first;
+          setStateDialog(() {
+            _hardwareIdController.text = best.device.remoteId.str;
+            _hardwareNameController.text = best.device.advName;
+          });
+        } else {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No named BLE beacons found.')));
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Scan failed: Make sure $_selectedHardwareType is turned on.'))
+        );
+      }
+    } finally {
+      // Safely turn off the loading spinner, catching the error if the dialog was already closed
+      try {
+        setStateDialog(() => _isAutoScanning = false);
+      } catch (e) {
+        _isAutoScanning = false; 
+      }
+    }
+  }
+
+  Future<void> _showHardwareDialog() async {
     await showDialog(
       context: context,
       barrierDismissible: false,
@@ -85,47 +140,74 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
           builder: (context, setStateDialog) {
             return AlertDialog(
               title: const Text('Add Hardware Anchor'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text("Verify the crosshair is centered on the device's physical location.", style: TextStyle(fontSize: 13)),
-                  const SizedBox(height: 16),
-                  SegmentedButton<String>(
-                    segments: const [
-                      ButtonSegment(value: 'WIFI', label: Text('Wi-Fi'), icon: Icon(Icons.wifi)),
-                      ButtonSegment(value: 'BLE', label: Text('BLE'), icon: Icon(Icons.bluetooth)),
-                    ],
-                    selected: {_selectedHardwareType},
-                    onSelectionChanged: (Set<String> newSelection) {
-                      setStateDialog(() {
-                        _selectedHardwareType = newSelection.first;
-                        _hardwareIdController.clear();
-                      });
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: _hardwareIdController,
-                    decoration: InputDecoration(
-                      labelText: _selectedHardwareType == 'WIFI' ? 'MAC Address' : 'Beacon ID',
-                      border: const OutlineInputBorder(),
+              content: SingleChildScrollView( 
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(value: 'WIFI', label: Text('Wi-Fi'), icon: Icon(Icons.wifi)),
+                        ButtonSegment(value: 'BLE', label: Text('BLE'), icon: Icon(Icons.bluetooth)),
+                      ],
+                      selected: {_selectedHardwareType},
+                      onSelectionChanged: (Set<String> newSelection) {
+                        setStateDialog(() {
+                          _selectedHardwareType = newSelection.first;
+                          _hardwareIdController.clear();
+                          _hardwareNameController.clear();
+                        });
+                      },
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  ElevatedButton.icon(
-                    onPressed: () {
-                      Navigator.pop(context); 
-                      if (_selectedHardwareType == 'WIFI') {
-                        _scanForWifiNetworks();
-                      } else {
-                        _scanForBluetoothBeacons();
-                      }
-                    },
-                    icon: const Icon(Icons.search),
-                    label: Text('Scan Nearby ${_selectedHardwareType}'),
-                    style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 40)),
-                  ),
-                ],
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _hardwareNameController,
+                      decoration: const InputDecoration(
+                        labelText: 'Device Name (Optional)',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _hardwareIdController,
+                      decoration: InputDecoration(
+                        labelText: _selectedHardwareType == 'WIFI' ? 'MAC Address' : 'Beacon ID',
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _isAutoScanning ? null : () => _autoGrabStrongest(setStateDialog),
+                            icon: _isAutoScanning 
+                                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                                : const Icon(Icons.bolt, color: Colors.amber),
+                            label: const Text('Auto-Grab', style: TextStyle(fontSize: 12)),
+                            style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _isAutoScanning ? null : () {
+                              Navigator.pop(context); 
+                              if (_selectedHardwareType == 'WIFI') {
+                                _scanForWifiNetworks();
+                              } else {
+                                _scanForBluetoothBeacons();
+                              }
+                            },
+                            icon: const Icon(Icons.list),
+                            label: const Text('Scan List', style: TextStyle(fontSize: 12)),
+                            style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
               actions: [
                 TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
@@ -135,6 +217,7 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
                       _hardwareLocations.add({
                         'latLng': _mapCenter,
                         'hardwareId': _hardwareIdController.text.trim().isEmpty ? 'UNKNOWN' : _hardwareIdController.text.trim(),
+                        'hardwareName': _hardwareNameController.text.trim().isEmpty ? 'Unknown Device' : _hardwareNameController.text.trim(),
                         'hardwareType': _selectedHardwareType,
                       });
                     });
@@ -150,37 +233,44 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
     );
   }
 
-  // --- Scanning Logic ---
-
   Future<void> _scanForWifiNetworks() async {
-    await WiFiScan.instance.startScan();
-    final results = await WiFiScan.instance.getScannedResults();
-    results.sort((a, b) => b.level.compareTo(a.level));
-    if (!mounted) return;
-    _showResultsSheet(
-      title: 'Wi-Fi Networks',
-      items: results.map((r) => {'name': r.ssid.isEmpty ? 'Hidden' : r.ssid, 'id': r.bssid, 'signal': '${r.level} dBm'}).toList(),
-      type: 'WIFI'
-    );
+    try {
+      await WiFiScan.instance.startScan();
+      final results = await WiFiScan.instance.getScannedResults();
+      results.sort((a, b) => b.level.compareTo(a.level));
+      if (!mounted) return;
+      _showResultsSheet(
+        title: 'Wi-Fi Networks',
+        items: results.map((r) => {'name': r.ssid.isEmpty ? 'Hidden' : r.ssid, 'id': r.bssid, 'signal': '${r.level} dBm'}).toList(),
+        type: 'WIFI'
+      );
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to scan Wi-Fi')));
+    }
   }
 
   Future<void> _scanForBluetoothBeacons() async {
-    List<ScanResult> bleResults = [];
-    var subscription = FlutterBluePlus.onScanResults.listen((results) => bleResults = results);
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
-    await Future.delayed(const Duration(seconds: 4));
-    subscription.cancel();
-    
-    // Filter out nameless devices for a cleaner UI
-    final filtered = bleResults.where((r) => r.device.advName.isNotEmpty).toList();
-    filtered.sort((a, b) => b.rssi.compareTo(a.rssi));
+    try {
+      List<ScanResult> bleResults = [];
+      var subscription = FlutterBluePlus.onScanResults.listen((results) => bleResults = results);
+      
+      // Wrapped manual scan in try-catch as well
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
+      await Future.delayed(const Duration(seconds: 4));
+      subscription.cancel();
+      
+      final filtered = bleResults.where((r) => r.device.advName.isNotEmpty).toList();
+      filtered.sort((a, b) => b.rssi.compareTo(a.rssi));
 
-    if (!mounted) return;
-    _showResultsSheet(
-      title: 'BLE Beacons',
-      items: filtered.map((r) => {'name': r.device.advName, 'id': r.device.remoteId.str, 'signal': '${r.rssi} dBm'}).toList(),
-      type: 'BLE'
-    );
+      if (!mounted) return;
+      _showResultsSheet(
+        title: 'BLE Beacons',
+        items: filtered.map((r) => {'name': r.device.advName, 'id': r.device.remoteId.str, 'signal': '${r.rssi} dBm'}).toList(),
+        type: 'BLE'
+      );
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to scan BLE. Is Bluetooth on?')));
+    }
   }
 
   void _showResultsSheet({required String title, required List<Map<String, String>> items, required String type}) {
@@ -204,12 +294,12 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
                     subtitle: Text('ID: ${item['id']} | Signal: ${item['signal']}'),
                     onTap: () {
                       setState(() {
-                        // Injects the selected ID back into the controller!
                         _hardwareIdController.text = item['id']!;
+                        _hardwareNameController.text = item['name']!;
                         _selectedHardwareType = type;
                       });
                       Navigator.pop(context);
-                      _showHardwareDialog(); // Re-opens safely!
+                      _showHardwareDialog(); 
                     },
                   );
                 },
@@ -220,8 +310,6 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
       },
     );
   }
-
-  // --- Map Utilities ---
 
   void _undoLast() {
     setState(() {
@@ -255,9 +343,10 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
     for (int i = 0; i < _hardwareLocations.length; i++) {
       final loc = _hardwareLocations[i];
       markers.add(Marker(
-        markerId: MarkerId('anchor_$i'), // Unique ID so markers don't overwrite each other
+        markerId: MarkerId('anchor_$i'),
         position: loc['latLng'],
         icon: BitmapDescriptor.defaultMarkerWithHue(loc['hardwareType'] == 'BLE' ? BitmapDescriptor.hueViolet : BitmapDescriptor.hueOrange),
+        infoWindow: InfoWindow(title: loc['hardwareName'], snippet: 'ID: ${loc['hardwareId']}'),
       ));
     }
     return markers;
@@ -293,19 +382,15 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
       body: Stack(
         children: [
           GoogleMap(
-            // Forces 2D Top-Down View
             initialCameraPosition: CameraPosition(target: _mapCenter, zoom: 19, tilt: 0, bearing: 0),
             onMapCreated: (controller) => _mapController = controller,
             markers: _buildMarkers(),
             polylines: _buildPolylines(),
             myLocationEnabled: _hasLocationPermission,
             myLocationButtonEnabled: false,
-            
-            // Disables 3D gestures to prevent parallax error
             tiltGesturesEnabled: false,
             rotateGesturesEnabled: false,
             mapToolbarEnabled: false,
-            
             onCameraMove: (pos) {
               if (pos.tilt != 0 || pos.bearing != 0) {
                 _mapController?.animateCamera(CameraUpdate.newCameraPosition(
@@ -316,18 +401,15 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
             },
           ),
           
-          // STATIC CENTRAL CROSSHAIR
           const IgnorePointer(
             child: Center(
               child: Padding(
-                // Offset perfectly so the "tip" of the pin is the exact center coordinate
                 padding: EdgeInsets.only(bottom: 36), 
                 child: Icon(Icons.add_location_alt, color: Colors.redAccent, size: 44),
               ),
             ),
           ),
 
-          // Instructions overlay
           Positioned(
             top: 15, left: 15, right: 15,
             child: Card(
