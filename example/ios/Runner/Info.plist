@@ -80,5 +80,7 @@
 	<string>This app requires Bluetooth to scan for indoor positioning beacons.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>This app requires Bluetooth to communicate with indoor beacons.</string>
+	<key>NSMotionUsageDescription</key>
+    <string>We use the barometer to calculate which floor you are on.</string>
 </dict>
 </plist>

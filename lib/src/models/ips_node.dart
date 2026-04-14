@@ -11,9 +11,11 @@ class IpsNode {
   final LatLng globalCoordinates; 
   final double localX;            
   final double localY;  
-  // Added fields to store hardware information for routers
+  // Added fields to store hardware information for routers (nullable)
   final String? hardwareId; 
   final HardwareType hardwareType;          
+  final String? hardwareName; 
+  final int? floor;
 
   IpsNode({
     required this.id,
@@ -23,6 +25,8 @@ class IpsNode {
     required this.localY,
     this.hardwareId,
     this.hardwareType = HardwareType.none, // Defaults to none for corners/origins
+    this.hardwareName,
+    this.floor = 1, // Default to floor 1 if not specified
   });
 
   Map<String, dynamic> toJson() {
@@ -35,6 +39,8 @@ class IpsNode {
       'localY': localY,
       'hardwareId': hardwareId, 
       'hardwareType': hardwareType.name,
+      'hardwareName': hardwareName,
+      'floor': floor,
     };
   }
 
@@ -51,6 +57,8 @@ class IpsNode {
       hardwareType: json['hardwareType'] != null 
           ? HardwareType.values.firstWhere((e) => e.name == json['hardwareType'])
           : HardwareType.none, 
+      hardwareName: json['hardwareName'],
+      floor: json['floor'] ?? 1, // Default to floor 1 if not specified
     );
   }
 

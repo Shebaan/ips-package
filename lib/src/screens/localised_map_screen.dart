@@ -19,15 +19,22 @@ class LocalisedMapScreen extends StatefulWidget {
 }
 
 class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
-  // This controller allows us to manipulate the camera programmatically
   final TransformationController _transformationController = TransformationController();
-  // The current rotation of the map in radians
   double _rotationAngle = 0.0;
+
+  // --- NEW: Z-Axis UI State ---
+  int? _selectedFloorOverride; // If null, the map follows the engine's "Live Floor"
+  List<int> _availableFloors = [];
 
   @override
   void initState() {
     super.initState();
-    // Once the screen finishes drawing, zoom out and center
+    
+    // Dynamically figure out how many floors we mapped during setup
+    _availableFloors = widget.routers.map((r) => r.floor ?? 1).toSet().toList();
+    _availableFloors.sort(); // Sort them 1, 2, 3...
+    if (_availableFloors.isEmpty) _availableFloors = [1]; // Fallback
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _resetAndCenterView();
     });
@@ -39,12 +46,10 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
     super.dispose();
   }
 
-  // Math to center the massive 3000x3000 canvas and zoom out
   void _resetAndCenterView() {
     final screenWidth = MediaQuery.of(context).size.width;
     final screenHeight = MediaQuery.of(context).size.height;
-
-    const double targetScale = 0.4; // Start at 40% zoom
+    const double targetScale = 0.4; 
 
     final double xOffset = (3000 * targetScale - screenWidth) / 2;
     final double yOffset = (3000 * targetScale - screenHeight) / 2;
@@ -54,23 +59,36 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
       ..scale(targetScale);
   }
 
-  // The math to handle manual zoom button clicks
   void _zoom(double factor) {
     final matrix = _transformationController.value.clone();
-    // Multiply the current zoom level by the factor
     matrix.scale(factor, factor, 1.0);
     _transformationController.value = matrix;
   }
 
   void _rotate(bool clockwise) {
     setState(() {
-      // 0.785398 radians is exactly 45 degrees
       if (clockwise) {
         _rotationAngle += 0.785398;
       } else {
         _rotationAngle -= 0.785398;
       }
     });
+  }
+
+  // --- NEW: A helper to build the rotating canvas cleanly ---
+  Widget _buildCanvas(Map<String, double>? livePos, int activeFloor) {
+    return Transform.rotate(
+      angle: _rotationAngle,
+      child: CustomPaint(
+        size: const Size(3000, 3000),
+        painter: FloorplanPainter(
+          corners: widget.corners, 
+          anchors: widget.routers,
+          userPos: livePos, 
+          activeFloor: activeFloor, // Pass the floor to the painter!
+        ),
+      ),
+    );
   }
 
   @override
@@ -81,96 +99,89 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
         backgroundColor: Colors.blueGrey,
         foregroundColor: Colors.white,
       ),
-      // Use a Stack to float buttons over the map
       body: Stack(
         children: [
-          // THE MAP
+          // THE MAP LAYER
           InteractiveViewer(
             transformationController: _transformationController,
             boundaryMargin: const EdgeInsets.all(double.infinity),
-            minScale: 0.05, // Allowed to zoom out extremely far
+            minScale: 0.05, 
             maxScale: 5.0,
             constrained: false,
             
-            // Wrap the CustomPaint in a listener so it redraws live
+            // Nested Listeners to watch BOTH position and floor changes
             child: widget.locationEngine == null 
-              ? Transform.rotate(
-                  angle: _rotationAngle, // <-- APPLIED ROTATION HERE
-                  child: CustomPaint(
-                    size: const Size(3000, 3000),
-                    painter: FloorplanPainter(
-                      corners: widget.corners, 
-                      anchors: widget.routers,
-                      userPos: null, // No live tracking active
-                    ),
-                  ),
-                )
-              : ValueListenableBuilder<Map<String, double>?>(
-                  valueListenable: widget.locationEngine!.liveLocalPosition,
-                  builder: (context, livePos, child) {
-                    return Transform.rotate(
-                      angle: _rotationAngle, // <-- APPLIED ROTATION HERE
-                      child: CustomPaint(
-                        size: const Size(3000, 3000),
-                        painter: FloorplanPainter(
-                          corners: widget.corners, 
-                          anchors: widget.routers,
-                          userPos: livePos, // Feed the live coordinates to the painter
-                        ),
-                      ),
+              ? _buildCanvas(null, _selectedFloorOverride ?? _availableFloors.first)
+              : ValueListenableBuilder<int>(
+                  valueListenable: widget.locationEngine!.liveFloor,
+                  builder: (context, liveFloor, _) {
+                    return ValueListenableBuilder<Map<String, double>?>(
+                      valueListenable: widget.locationEngine!.liveLocalPosition,
+                      builder: (context, livePos, _) {
+                        
+                        // Decide which floor to show: Manual Override OR Live Barometer Floor
+                        final activeFloor = _selectedFloorOverride ?? liveFloor;
+                        
+                        return _buildCanvas(livePos, activeFloor);
+                      },
                     );
                   },
                 ),
           ),
 
-          // THE ZOOM & ROTATE BUTTONS
+          // --- NEW: THE FLOOR SELECTOR DROPDOWN (Top Left) ---
+          Positioned(
+            top: 20,
+            left: 20,
+            child: Card(
+              elevation: 4,
+              color: Colors.white.withOpacity(0.9),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<int?>(
+                    value: _selectedFloorOverride,
+                    icon: const Icon(Icons.layers, color: Colors.blueGrey),
+                    style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87),
+                    items: [
+                      // If tracking is off, 'Live Floor' is disabled
+                      DropdownMenuItem(
+                        value: null, 
+                        enabled: widget.locationEngine != null,
+                        child: Text(widget.locationEngine != null ? 'Live Floor (Auto)' : 'Select Floor:'),
+                      ),
+                      ..._availableFloors.map((floor) => DropdownMenuItem(
+                        value: floor, 
+                        child: Text('Level $floor'),
+                      )),
+                    ],
+                    onChanged: (int? newValue) {
+                      setState(() {
+                        _selectedFloorOverride = newValue;
+                      });
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          // THE ZOOM & ROTATE BUTTONS (Bottom Right)
           Positioned(
             bottom: 30,
             right: 20,
             child: Column(
               children: [
-                // <-- ADDED ROTATE BUTTONS HERE
-                FloatingActionButton(
-                  heroTag: 'rotate_left',
-                  mini: true,
-                  backgroundColor: Colors.blueGrey,
-                  foregroundColor: Colors.white,
-                  onPressed: () => _rotate(false),
-                  child: const Icon(Icons.rotate_left),
-                ),
+                FloatingActionButton(heroTag: 'rotate_left', mini: true, backgroundColor: Colors.blueGrey, foregroundColor: Colors.white, onPressed: () => _rotate(false), child: const Icon(Icons.rotate_left)),
                 const SizedBox(height: 10),
-                FloatingActionButton(
-                  heroTag: 'rotate_right',
-                  mini: true,
-                  backgroundColor: Colors.blueGrey,
-                  foregroundColor: Colors.white,
-                  onPressed: () => _rotate(true),
-                  child: const Icon(Icons.rotate_right),
-                ),
+                FloatingActionButton(heroTag: 'rotate_right', mini: true, backgroundColor: Colors.blueGrey, foregroundColor: Colors.white, onPressed: () => _rotate(true), child: const Icon(Icons.rotate_right)),
                 const SizedBox(height: 10),
-                // Existing Zoom Buttons
-                FloatingActionButton(
-                  heroTag: 'zoom_in',
-                  mini: true,
-                  onPressed: () => _zoom(1.3), // Zoom in by 30%
-                  child: const Icon(Icons.add),
-                ),
+                FloatingActionButton(heroTag: 'zoom_in', mini: true, onPressed: () => _zoom(1.3), child: const Icon(Icons.add)),
                 const SizedBox(height: 10),
-                FloatingActionButton(
-                  heroTag: 'zoom_out',
-                  mini: true,
-                  onPressed: () => _zoom(0.7), // Zoom out by 30%
-                  child: const Icon(Icons.remove),
-                ),
+                FloatingActionButton(heroTag: 'zoom_out', mini: true, onPressed: () => _zoom(0.7), child: const Icon(Icons.remove)),
                 const SizedBox(height: 10),
-                FloatingActionButton(
-                  heroTag: 'reset_view',
-                  mini: true,
-                  backgroundColor: Colors.blueGrey,
-                  foregroundColor: Colors.white,
-                  onPressed: _resetAndCenterView,
-                  child: const Icon(Icons.center_focus_strong),
-                ),
+                FloatingActionButton(heroTag: 'reset_view', mini: true, backgroundColor: Colors.blueGrey, foregroundColor: Colors.white, onPressed: _resetAndCenterView, child: const Icon(Icons.center_focus_strong)),
               ],
             ),
           ),
@@ -180,25 +191,27 @@ class _LocalisedMapScreenState extends State<LocalisedMapScreen> {
   }
 }
 
-// THE PAINTER 
+// --- THE PAINTER ---
 class FloorplanPainter extends CustomPainter {
   final List<IpsNode> corners;
   final List<IpsNode> anchors;
-  final Map<String, double>? userPos; // Added user position variable
+  final Map<String, double>? userPos; 
+  final int activeFloor; // NEW: The painter needs to know what floor to draw
   
   final double scale = 20.0; 
 
-  // Updated constructor
   FloorplanPainter({
     required this.corners, 
     required this.anchors,
     required this.userPos,
+    required this.activeFloor, // NEW
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
 
+    // 1. Draw Grid
     final gridPaint = Paint()
       ..color = Colors.grey.withOpacity(0.3)
       ..style = PaintingStyle.stroke
@@ -206,6 +219,7 @@ class FloorplanPainter extends CustomPainter {
     canvas.drawLine(Offset(0, center.dy), Offset(size.width, center.dy), gridPaint);
     canvas.drawLine(Offset(center.dx, 0), Offset(center.dx, size.height), gridPaint);
 
+    // 2. Draw Perimeter (Corners are assumed to be consistent across floors)
     if (corners.isNotEmpty) {
       final pathPaint = Paint()
         ..color = Colors.blueAccent.withOpacity(0.2)
@@ -234,8 +248,8 @@ class FloorplanPainter extends CustomPainter {
       canvas.drawPath(path, borderPaint);
     }
 
+    // 3. Draw Corner Dots
     final nodePaint = Paint()..style = PaintingStyle.fill;
-
     for (var corner in corners) {
       final px = center.dx + (corner.localX * scale);
       final py = center.dy - (corner.localY * scale);
@@ -249,11 +263,13 @@ class FloorplanPainter extends CustomPainter {
       }
     }
 
-    for (var anchor in anchors) {
+    // 4. Draw Hardware Anchors (FILTERED BY FLOOR!)
+    final visibleAnchors = anchors.where((a) => a.floor == activeFloor).toList();
+    
+    for (var anchor in visibleAnchors) {
       final px = center.dx + (anchor.localX * scale);
       final py = center.dy - (anchor.localY * scale);
       
-      // Determine the color based on the hardware type!
       final isBle = anchor.hardwareType == HardwareType.ble;
       final Color baseColor = isBle ? Colors.deepPurple : Colors.deepOrange;
       
@@ -267,21 +283,17 @@ class FloorplanPainter extends CustomPainter {
       canvas.drawCircle(Offset(px, py), 25.0, ringPaint);
     }
 
-    // 6. DRAW THE LIVE USER LOCATION
+    // 5. Draw the Live User Location (if active)
     if (userPos != null) {
-      // Use the exact same scale/center math to plot the user's local X/Y
       final px = center.dx + (userPos!['x']! * scale);
       final py = center.dy - (userPos!['y']! * scale);
       
-      // Draw a soft pulsing halo
       final haloPaint = Paint()..color = Colors.blue.withOpacity(0.3);
       canvas.drawCircle(Offset(px, py), 20.0, haloPaint);
 
-      // Draw the solid center dot
       final userDotPaint = Paint()..color = Colors.blueAccent;
       canvas.drawCircle(Offset(px, py), 10.0, userDotPaint);
       
-      // Add a white border to make it pop against the grid
       final userBorder = Paint()
         ..color = Colors.white
         ..style = PaintingStyle.stroke
@@ -291,9 +303,10 @@ class FloorplanPainter extends CustomPainter {
   }
 
   @override
-  // Ensure it repaints whenever the data changes!
   bool shouldRepaint(covariant FloorplanPainter oldDelegate) {
+    // Re-draw the canvas if the user moves OR if the active floor changes
     return oldDelegate.userPos?['x'] != userPos?['x'] || 
-           oldDelegate.userPos?['y'] != userPos?['y'];
+           oldDelegate.userPos?['y'] != userPos?['y'] ||
+           oldDelegate.activeFloor != activeFloor;
   } 
 }

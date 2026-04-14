@@ -1,5 +1,5 @@
 /// A high-precision IPS collection screen using Crosshair-to-Map positioning.
-/// Features a forced 2D view, Auto-Grab functionality, and Device Name tracking.
+/// Features a forced 2D view, Auto-Grab functionality, and Floor/Z-Axis Tracking.
 
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -7,6 +7,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:wifi_scan/wifi_scan.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:sensors_plus/sensors_plus.dart'; // NEW: For the Barometer
 
 enum CollectionPhase { corners, anchors }
 
@@ -31,11 +32,68 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
   bool _hasLocationPermission = false;
   bool _isAutoScanning = false; 
 
+  // --- Z-AXIS TRACKING VARIABLES ---
+  int _currentFloor = 1; 
+  Map<int, double> _floorPressures = {}; // Stores the calibrated pressure for each floor
+  double _livePressure = 0.0;
+  StreamSubscription<BarometerEvent>? _barometerSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    // Start listening to the barometer immediately
+    _barometerSubscription = barometerEventStream().listen((BarometerEvent event) {
+      if (mounted) {
+        setState(() {
+          _livePressure = event.pressure;
+        });
+      }
+    });
+  }
+
   @override
   void dispose() {
     _hardwareIdController.dispose();
     _hardwareNameController.dispose();
+    _barometerSubscription?.cancel(); // Clean up the sensor
     super.dispose();
+  }
+
+  // NEW: Captures the 10-second average pressure for the current floor
+  Future<void> _calibrateCurrentFloor() async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text("Calibrating Floor Pressure...\nPlease hold the phone steady."),
+          ],
+        ),
+      ),
+    );
+
+    // Collect data for 3 seconds to get a stable average
+    List<double> readings = [];
+    StreamSubscription<BarometerEvent> tempSub = barometerEventStream().listen((event) {
+      readings.add(event.pressure);
+    });
+
+    await Future.delayed(const Duration(seconds: 3));
+    tempSub.cancel();
+    
+    if (mounted) Navigator.pop(context); // Close dialog
+
+    if (readings.isNotEmpty) {
+      double average = readings.reduce((a, b) => a + b) / readings.length;
+      setState(() {
+        _floorPressures[_currentFloor] = average;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Floor $_currentFloor calibrated at ${average.toStringAsFixed(2)} hPa')));
+    }
   }
 
   Future<void> _goToMyLocation() async {
@@ -68,10 +126,7 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
       _hardwareIdController.clear();
       _hardwareNameController.clear();
       _selectedHardwareType = 'WIFI';
-      
-      // FIX 1: Force reset the loading state in case they cancelled early last time
       _isAutoScanning = false; 
-      
       _showHardwareDialog();
     }
   }
@@ -94,11 +149,9 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
           if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No Wi-Fi networks found.')));
         }
       } else {
-        // BLE Auto-Grab
         List<ScanResult> bleResults = [];
         var subscription = FlutterBluePlus.onScanResults.listen((results) => bleResults = results);
         
-        // FIX 2: Wrapped in try-catch to prevent CBManagerStateUnknown crash
         await FlutterBluePlus.startScan(timeout: const Duration(seconds: 2));
         await Future.delayed(const Duration(seconds: 2));
         subscription.cancel();
@@ -122,7 +175,6 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
         );
       }
     } finally {
-      // Safely turn off the loading spinner, catching the error if the dialog was already closed
       try {
         setStateDialog(() => _isAutoScanning = false);
       } catch (e) {
@@ -144,6 +196,20 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // NEW: Shows what floor this anchor will be saved to!
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      color: Colors.blue.withOpacity(0.1),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.layers, color: Colors.blue),
+                          const SizedBox(width: 8),
+                          Text('Saving to: Floor $_currentFloor', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
                     SegmentedButton<String>(
                       segments: const [
                         ButtonSegment(value: 'WIFI', label: Text('Wi-Fi'), icon: Icon(Icons.wifi)),
@@ -161,29 +227,20 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
                     const SizedBox(height: 16),
                     TextField(
                       controller: _hardwareNameController,
-                      decoration: const InputDecoration(
-                        labelText: 'Device Name (Optional)',
-                        border: OutlineInputBorder(),
-                      ),
+                      decoration: const InputDecoration(labelText: 'Device Name (Optional)', border: OutlineInputBorder()),
                     ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: _hardwareIdController,
-                      decoration: InputDecoration(
-                        labelText: _selectedHardwareType == 'WIFI' ? 'MAC Address' : 'Beacon ID',
-                        border: const OutlineInputBorder(),
-                      ),
+                      decoration: InputDecoration(labelText: _selectedHardwareType == 'WIFI' ? 'MAC Address' : 'Beacon ID', border: const OutlineInputBorder()),
                     ),
                     const SizedBox(height: 16),
-                    
                     Row(
                       children: [
                         Expanded(
                           child: ElevatedButton.icon(
                             onPressed: _isAutoScanning ? null : () => _autoGrabStrongest(setStateDialog),
-                            icon: _isAutoScanning 
-                                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                                : const Icon(Icons.bolt, color: Colors.amber),
+                            icon: _isAutoScanning ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.bolt, color: Colors.amber),
                             label: const Text('Auto-Grab', style: TextStyle(fontSize: 12)),
                             style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
                           ),
@@ -219,6 +276,7 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
                         'hardwareId': _hardwareIdController.text.trim().isEmpty ? 'UNKNOWN' : _hardwareIdController.text.trim(),
                         'hardwareName': _hardwareNameController.text.trim().isEmpty ? 'Unknown Device' : _hardwareNameController.text.trim(),
                         'hardwareType': _selectedHardwareType,
+                        'floor': _currentFloor, // NEW: Binds the beacon to the active floor!
                       });
                     });
                     Navigator.pop(context);
@@ -253,8 +311,6 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
     try {
       List<ScanResult> bleResults = [];
       var subscription = FlutterBluePlus.onScanResults.listen((results) => bleResults = results);
-      
-      // Wrapped manual scan in try-catch as well
       await FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
       await Future.delayed(const Duration(seconds: 4));
       subscription.cancel();
@@ -340,13 +396,17 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
         },
       ));
     }
-    for (int i = 0; i < _hardwareLocations.length; i++) {
-      final loc = _hardwareLocations[i];
+    
+    // NEW: Only draw markers for the CURRENT floor so the map doesn't get messy
+    final currentFloorAnchors = _hardwareLocations.where((loc) => loc['floor'] == _currentFloor).toList();
+    
+    for (int i = 0; i < currentFloorAnchors.length; i++) {
+      final loc = currentFloorAnchors[i];
       markers.add(Marker(
-        markerId: MarkerId('anchor_$i'),
+        markerId: MarkerId('anchor_${loc['hardwareId']}'),
         position: loc['latLng'],
         icon: BitmapDescriptor.defaultMarkerWithHue(loc['hardwareType'] == 'BLE' ? BitmapDescriptor.hueViolet : BitmapDescriptor.hueOrange),
-        infoWindow: InfoWindow(title: loc['hardwareName'], snippet: 'ID: ${loc['hardwareId']}'),
+        infoWindow: InfoWindow(title: loc['hardwareName'], snippet: 'Floor ${loc['floor']} | ID: ${loc['hardwareId']}'),
       ));
     }
     return markers;
@@ -374,7 +434,14 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
             )
           else if (_currentPhase == CollectionPhase.anchors)
             TextButton(
-              onPressed: () => Navigator.pop(context, {'corners': _buildingCorners, 'routers': _hardwareLocations}),
+              onPressed: () {
+                // EXPORT BOTH the anchors AND the pressure baseline data
+                Navigator.pop(context, {
+                  'corners': _buildingCorners, 
+                  'routers': _hardwareLocations,
+                  'floorPressures': _floorPressures 
+                });
+              },
               child: const Text('Finish', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green))
             )
         ],
@@ -410,24 +477,73 @@ class _MapCollectionScreenState extends State<MapCollectionScreen> {
             ),
           ),
 
-          Positioned(
-            top: 15, left: 15, right: 15,
-            child: Card(
-              elevation: 4,
-              child: Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Text(
-                  _currentPhase == CollectionPhase.corners
-                      ? _isPerimeterClosed 
-                          ? 'Perimeter Locked. Tap NEXT.' 
-                          : 'Move map to a corner and tap [+]'
-                      : 'Move map to an Anchor location and tap [+]',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+          // NEW: The Z-Axis / Floor Control Panel
+          if (_currentPhase == CollectionPhase.anchors)
+            Positioned(
+              top: 15, left: 15, right: 15,
+              child: Card(
+                elevation: 6,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('Active Floor:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                          Row(
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.remove_circle_outline),
+                                onPressed: () => setState(() { if (_currentFloor > 0) _currentFloor--; }),
+                              ),
+                              Text('$_currentFloor', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                              IconButton(
+                                icon: const Icon(Icons.add_circle_outline),
+                                onPressed: () => setState(() { _currentFloor++; }),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      const Divider(),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text('Pressure: ${_livePressure.toStringAsFixed(2)} hPa', style: const TextStyle(color: Colors.grey)),
+                          TextButton.icon(
+                            icon: Icon(
+                              _floorPressures.containsKey(_currentFloor) ? Icons.check_circle : Icons.warning,
+                              color: _floorPressures.containsKey(_currentFloor) ? Colors.green : Colors.orange,
+                            ),
+                            label: Text(_floorPressures.containsKey(_currentFloor) ? 'Calibrated' : 'Calibrate Floor'),
+                            onPressed: _calibrateCurrentFloor,
+                          )
+                        ],
+                      )
+                    ],
+                  ),
                 ),
               ),
-            ),
-          )
+            )
+          else
+            Positioned(
+              top: 15, left: 15, right: 15,
+              child: Card(
+                elevation: 4,
+                child: Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: Text(
+                    _isPerimeterClosed 
+                        ? 'Perimeter Locked. Tap NEXT.' 
+                        : 'Move map to a corner and tap [+]',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+            )
         ],
       ),
       floatingActionButton: Column(

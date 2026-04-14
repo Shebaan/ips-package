@@ -26,15 +26,15 @@ class IpsIntegrationService {
   void _listenToEngine() {
     locationEngine.liveLocation.addListener(() {
       final currentLocation = locationEngine.liveLocation.value;
+      // NEW: Grab the floor!
+      final currentFloor = locationEngine.liveFloor.value; 
       
       if (currentLocation != null) {
-        // 1. Push to the App Stream
         _indoorLocationStream.add(currentLocation);
         
-        // 2. Simulate sending to Backend via Socket.io
-        _simulateSocketEmit(currentLocation);
+        // Pass both location AND floor to the backend
+        _simulateSocketEmit(currentLocation, currentFloor); 
         
-        // 3. Run Security Geo-fence Checks
         _checkGeofence(currentLocation);
       }
     });
@@ -87,9 +87,9 @@ class IpsIntegrationService {
     _alertStream.add('out_of_bounds'); 
   }
 
-  void _simulateSocketEmit(LatLng loc) {
-    // In the real app, this is where you use socket.emit()
-    print("SOCKET EMIT: update_location -> ${loc.latitude}, ${loc.longitude}");
+  void _simulateSocketEmit(LatLng loc, int floor) {
+    // This is the JSON payload you will eventually send to Node.js
+    print("SOCKET EMIT: update_location -> {lat: ${loc.latitude}, lng: ${loc.longitude}, floor: $floor}");
   }
 
   void dispose() {

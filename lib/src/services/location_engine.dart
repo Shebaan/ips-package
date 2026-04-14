@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:math';
-import 'dart:io'; // Needed to check if Platform is iOS or Android
+import 'dart:io'; 
 import 'package:flutter/foundation.dart';
 import 'package:wifi_scan/wifi_scan.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart'; // Added BLE package
+import 'package:flutter_blue_plus/flutter_blue_plus.dart'; 
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:sensors_plus/sensors_plus.dart'; // NEW: Barometer support
 
 import '../models/ips_node.dart';
 import '../utils/math_utils.dart';
@@ -14,32 +15,32 @@ import 'anchor_manager.dart';
 class LocationEngine {
   final AnchorManager anchorManager;
   Timer? _scanTimer;
+  StreamSubscription<BarometerEvent>? _barometerSubscription; // NEW
   
-  // Prevents the 3-second timer from overlapping scans if hardware is slow
   bool _isScanning = false; 
 
-  // Broadcasts the real-world GPS coordinates (for Google Maps)
   final ValueNotifier<LatLng?> liveLocation = ValueNotifier(null);
-  // Broadcasts the flat 2D grid coordinates (for our Localised Map)
   final ValueNotifier<Map<String, double>?> liveLocalPosition = ValueNotifier(null);
+  
+  // NEW: Broadcasts the active floor!
+  final ValueNotifier<int> liveFloor = ValueNotifier(1); 
+  int _currentFloor = 1;
 
   LocationEngine({required this.anchorManager});
 
-  // Toggle this to TRUE if you are testing on a Mac/PC emulator!
   final bool isSimulationMode = false; 
-  
-  // Tracks the passage of time for the simulation patrol route
   int _simTick = 0;
 
   void startTracking() {
     if (_scanTimer != null && _scanTimer!.isActive) return;
     
-    print("Starting Live IPS Tracking (Sensor Fusion Active)...");
+    print("Starting Live IPS Tracking (Sensor Fusion & Z-Axis Active)...");
     
-    // Trigger the first scan immediately so the UI updates instantly
+    // --- NEW: Start listening to the Barometer ---
+    _startFloorTracking();
+    
     _performLocationUpdate();
 
-    // Scan every 3 seconds 
     _scanTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       _performLocationUpdate();
     });
@@ -49,27 +50,59 @@ class LocationEngine {
     print("Stopping Live IPS Tracking.");
     _scanTimer?.cancel();
     _scanTimer = null;
+    _barometerSubscription?.cancel(); // NEW: Turn off barometer
+    _barometerSubscription = null;
     _isScanning = false;
   }
 
+  // --- NEW: The Floor Calculator ---
+  void _startFloorTracking() {
+    if (anchorManager.floorPressures.isEmpty) {
+      print("LocationEngine: No floor pressure baselines found. Defaulting to Floor 1.");
+      _currentFloor = 1;
+      liveFloor.value = 1;
+      return;
+    }
+
+    _barometerSubscription = barometerEventStream().listen((event) {
+      double livePressure = event.pressure;
+      double smallestDiff = double.infinity;
+      int closestFloor = _currentFloor;
+
+      // Find the floor with the baseline pressure closest to right now
+      anchorManager.floorPressures.forEach((floor, baselinePressure) {
+        double diff = (livePressure - baselinePressure).abs();
+        if (diff < smallestDiff) {
+          smallestDiff = diff;
+          closestFloor = floor;
+        }
+      });
+
+      // If the floor changed, update the system!
+      if (_currentFloor != closestFloor) {
+        print("Z-AXIS SHIFT DETECTED: User moved from Floor $_currentFloor to Floor $closestFloor");
+        _currentFloor = closestFloor;
+        liveFloor.value = _currentFloor;
+      }
+    });
+  }
+
   Future<void> _performLocationUpdate() async {
-    // Overlap protection
     if (_isScanning) return; 
     _isScanning = true;
 
     List<Map<String, dynamic>> usableAnchors = [];
 
     if (isSimulationMode) {
-      // ---------------------------------------------------------
-      // SIMULATION MODE: The Walking Ghost Patrol
-      // ---------------------------------------------------------
-      if (anchorManager.hardwareAnchors.isEmpty) {
-        print("Simulator: No anchors saved in AnchorManager.");
+      // Simulator: Only use anchors on the current floor
+      final floorAnchors = anchorManager.hardwareAnchors.where((a) => a.floor == _currentFloor).toList();
+      
+      if (floorAnchors.isEmpty) {
         _isScanning = false;
         return;
       }
 
-      final int numAnchors = anchorManager.hardwareAnchors.length;
+      final int numAnchors = floorAnchors.length;
       if (numAnchors < 2) {
         _isScanning = false;
         return; 
@@ -83,7 +116,7 @@ class LocationEngine {
       final random = Random();
 
       for (int i = 0; i < numAnchors; i++) {
-        final knownAnchor = anchorManager.hardwareAnchors[i];
+        final knownAnchor = floorAnchors[i];
         double simulatedRssi;
 
         if (i == currentLeg) {
@@ -106,58 +139,38 @@ class LocationEngine {
       _simTick++; 
       
     } else {
-      // ---------------------------------------------------------
-      // PRODUCTION MODE: Sensor Fusion (Wi-Fi + BLE)
-      // ---------------------------------------------------------
-      
-      // 1. Android ONLY: Scan for Wi-Fi Networks
       if (!kIsWeb && Platform.isAndroid) {
         usableAnchors.addAll(await _scanWifi());
       }
-
-      // 2. ALL PLATFORMS (iOS & Android): Scan for BLE Beacons
       usableAnchors.addAll(await _scanBle());
     }
 
-    // --- MATH ENGINE (Executes regardless of simulation or platform) ---
     if (usableAnchors.isEmpty) {
-      print("LocationEngine: No mapped anchors visible.");
       _isScanning = false;
       return;
     }
 
-    // 3. Calculate local (x,y) using WKNN
     final localPosition = MathUtils.calculateWknnPosition(usableAnchors);
     if (localPosition == null) {
       _isScanning = false;
       return;
     }
 
-    // 4. Broadcast the flat 2D grid coordinates for the custom painter!
     liveLocalPosition.value = localPosition; 
 
-    // 5. Find the Origin Node to reverse the math
     final originNode = anchorManager.buildingCorners.firstWhere(
       (node) => node.type == NodeType.origin
     );
 
-    // 6. Convert local (x,y) back to Global GPS Coordinates
     final globalPos = CoordinateConverter.toGlobalCoordinates(
       localX: localPosition['x']!,
       localY: localPosition['y']!,
       origin: originNode.globalCoordinates, 
     );
 
-    // 7. Broadcast the live GPS coordinates to the UI
     liveLocation.value = globalPos;
-    
-    // Unlock the scanner for the next tick
     _isScanning = false;
   }
-
-  // ===================================================================
-  // HARDWARE SCANNER HELPERS
-  // ===================================================================
 
   Future<List<Map<String, dynamic>>> _scanWifi() async {
     List<Map<String, dynamic>> processedWifi = [];
@@ -170,13 +183,15 @@ class LocationEngine {
     for (var ap in results) {
       try {
         final knownRouter = anchorManager.hardwareAnchors.firstWhere(
-          (anchor) => anchor.hardwareType == HardwareType.wifi && anchor.hardwareId == ap.bssid,
+          (anchor) => anchor.hardwareType == HardwareType.wifi && 
+                      anchor.hardwareId == ap.bssid &&
+                      anchor.floor == _currentFloor, // NEW: IGNORE ROUTERS ON OTHER FLOORS!
         );
 
         final distance = MathUtils.calculateDistance(ap.level, RfEnvironment.wifiOffice);
         processedWifi.add({'x': knownRouter.localX, 'y': knownRouter.localY, 'distance': distance});
       } catch (e) {
-        continue; // Not a router we care about
+        continue; 
       }
     }
     return processedWifi;
@@ -186,12 +201,10 @@ class LocationEngine {
     List<Map<String, dynamic>> processedBle = [];
     List<ScanResult> bleResults = [];
     
-    // Listen to the BLE stream
     var subscription = FlutterBluePlus.onScanResults.listen((results) {
       bleResults = results;
     });
 
-    // Scan for exactly 2 seconds
     await FlutterBluePlus.startScan(timeout: const Duration(seconds: 2));
     await Future.delayed(const Duration(seconds: 2));
     subscription.cancel();
@@ -199,14 +212,15 @@ class LocationEngine {
     for (var r in bleResults) {
       try {
         final knownBeacon = anchorManager.hardwareAnchors.firstWhere(
-          (anchor) => anchor.hardwareType == HardwareType.ble && anchor.hardwareId == r.device.remoteId.str,
+          (anchor) => anchor.hardwareType == HardwareType.ble && 
+                      anchor.hardwareId == r.device.remoteId.str &&
+                      anchor.floor == _currentFloor, // NEW: IGNORE BEACONS ON OTHER FLOORS!
         );
 
-        // BLE math is identical to Wi-Fi math (Log-Distance Path Loss)
         final distance = MathUtils.calculateDistance(r.rssi, RfEnvironment.wifiOffice); 
         processedBle.add({'x': knownBeacon.localX, 'y': knownBeacon.localY, 'distance': distance});
       } catch (e) {
-        continue; // Not a beacon we care about
+        continue; 
       }
     }
     return processedBle;
